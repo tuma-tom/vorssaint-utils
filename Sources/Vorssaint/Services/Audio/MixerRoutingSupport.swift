@@ -486,12 +486,17 @@ enum MixerRoutingSupport {
         Set(uids.filter { airPlayConnected || !isAirPlaySentinel($0) })
     }
 
+    static func isSelectableSystemOutput(_ uid: String, canBeDefault: Bool) -> Bool {
+        canBeDefault && !VirtualOutputSupport.isSoftwareDevice(uid)
+    }
+
     static func nextSelectedOutputDeviceUID(currentUID: String?,
                                             selectedUIDs: [String],
                                             availableUIDs: Set<String>) -> String? {
         var seen = Set<String>()
         let candidates = selectedUIDs.compactMap { rawUID -> String? in
             guard let uid = sanitizedDeviceUID(rawUID),
+                  !VirtualOutputSupport.isSoftwareDevice(uid),
                   availableUIDs.contains(uid),
                   seen.insert(uid).inserted else { return nil }
             return uid

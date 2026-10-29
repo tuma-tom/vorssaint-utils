@@ -14,6 +14,9 @@ final class VirtualOutputService: ObservableObject {
     @Published private(set) var componentPresent = false
     @Published private(set) var isRemoving = false
     @Published private(set) var physicalOutputUID: String?
+    @Published private(set) var requestedOutputUID: String?
+    private let outputRequests = VirtualOutputSupport.OutputRequests()
+    private var acceptsOutputSelections = false // Main thread, like the published state.
     @Published private(set) var error: String?
     var isInstalled: Bool { VirtualOutputHAL.componentDevice() != nil }
     private let queue = DispatchQueue(label: "com.vorssaint.utils.software-volume.lifecycle", qos: .userInitiated)
@@ -30,6 +33,8 @@ final class VirtualOutputService: ObservableObject {
     private var enableAfterInstall = false
 
     func sync(enabled: Bool) {
+        acceptsOutputSelections = enabled
+        if !enabled { requestedOutputUID = nil; _ = outputRequests.next() }
         queue.async { [self] in
             let device = VirtualOutputHAL.componentDevice()
             let present = VirtualOutputHAL.installedComponentExists()
@@ -95,21 +100,49 @@ final class VirtualOutputService: ObservableObject {
             replaceBridge(physicalUID: target)
         }
     }
-    @discardableResult func selectPhysicalOutput(_ uid: String) -> Bool {
-        guard isActive || isStarting,
-              VirtualOutputHAL.physicalDevices().contains(where: { $0.uid == uid }) else { return false }
-        if physicalOutputUID == uid { return true }
+    @discardableResult func selectOutput(_ uid: String) -> Bool {
+        guard acceptsOutputSelections, !isRemoving, VirtualOutputHAL.componentDevice() != nil,
+              VirtualOutputHAL.restorableOutputs(systemSounds: false).contains(uid) else { return false }
+        let request = outputRequests.next()
+        requestedOutputUID = uid
         queue.async { [self] in
-            suspended = false
-            // A user output selection becomes the output restored on disable.
-            previousOutput = uid
-            previousSystemOutput = uid
-            if VirtualOutputHAL.hasHardwareVolume(uid) { deactivate() }
-            else { replaceBridge(physicalUID: uid) }
+            if outputRequests.isCurrent(request) { routeOutput(uid) }
+            DispatchQueue.main.async {
+                if self.outputRequests.isCurrent(request) { self.requestedOutputUID = nil }
+            }
         }
         return true
     }
+    private func routeOutput(_ uid: String) {
+        guard VirtualOutputHAL.restorableOutputs(systemSounds: false).contains(uid) else {
+            publish(error: .outputUnavailable); return
+        }
+        let physical = VirtualOutputHAL.physicalDevices().contains(where: { $0.uid == uid })
+        let hadSession = bridge != nil || virtual != nil
+        suspended = false
+        if bridge?.physicalUID == uid, VirtualOutputHAL.defaultUID() == virtualUID { return }
+        previousOutput = uid
+        if physical {
+            previousSystemOutput = hadSession ? uid : VirtualOutputHAL.defaultUID(kAudioHardwarePropertyDefaultSystemOutputDevice)
+        }
+        if !physical || VirtualOutputHAL.hasHardwareVolume(uid) {
+            deactivate()
+            // An earlier queued choice may already have released the virtual
+            // owner, so restoring on deactivation alone is insufficient.
+            guard VirtualOutputHAL.select(uid) else { publish(error: .outputUnavailable); return }
+            if physical && hadSession { _ = VirtualOutputHAL.select(uid, selector: kAudioHardwarePropertyDefaultSystemOutputDevice) }
+        } else {
+            if virtual == nil {
+                guard let device = VirtualOutputHAL.componentDevice() else { publish(error: .setupFailed); return }
+                virtual = device
+                virtualUID = VirtualOutputHAL.uid(device) ?? VirtualOutputSupport.deviceUID
+            }
+            replaceBridge(physicalUID: uid)
+        }
+    }
     func stop() {
+        acceptsOutputSelections = false
+        requestedOutputUID = nil; _ = outputRequests.next()
         queue.sync { deactivate() }
     }
     func installForFallback() {
@@ -128,6 +161,7 @@ final class VirtualOutputService: ObservableObject {
     /// authorization keeps the driver installed and the ordinary mixer usable.
     func removeComponent(completion: ((Bool) -> Void)? = nil) {
         guard !isRemoving else { completion?(false); return }
+        requestedOutputUID = nil; _ = outputRequests.next()
         enableAfterInstall = false
         guard let script = Bundle.main.url(forResource: "uninstall-software-volume-driver", withExtension: "sh") else {
             error = VirtualOutputStrings.localized(L10n.shared.language).message(.removalFailed)

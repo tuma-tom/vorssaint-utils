@@ -1124,8 +1124,7 @@ final class AppVolumeMixer: ObservableObject {
     /// universal picker, this must not erase explicit per-app routes or
     /// block the main thread while a device is being reconfigured.
     func setPriorityOutputDeviceUID(_ uid: String) {
-        if VirtualOutputService.shared.isActive {
-            _ = VirtualOutputService.shared.selectPhysicalOutput(uid)
+        if VirtualOutputService.shared.selectOutput(uid) {
             return
         }
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
@@ -1160,9 +1159,6 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     private func setDefaultOutputDeviceUID(_ uid: String) -> Bool {
-        if VirtualOutputService.shared.isActive, !VirtualOutputSupport.isSoftwareOutput(uid) {
-            return VirtualOutputService.shared.selectPhysicalOutput(uid)
-        }
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: { $0.uid == sanitized && $0.canBeDefaultOutput }) else {
             outputSwitchError = L10n.shared.s.mixerOutputUnavailable
@@ -1170,7 +1166,8 @@ final class AppVolumeMixer: ObservableObject {
             return false
         }
 
-        let status = Self.setDefaultDevice(device.audioObjectID,
+        let redirected = VirtualOutputService.shared.selectOutput(sanitized)
+        let status = redirected ? noErr : Self.setDefaultDevice(device.audioObjectID,
                                            selector: kAudioHardwarePropertyDefaultOutputDevice)
         guard status == noErr else {
             outputSwitchError = "OSStatus \(status)"
@@ -1236,9 +1233,11 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     func switchToNextSoundOutput(in selectedUIDs: [String]) -> Bool {
-        let availableUIDs = Set(outputDevices.filter(\.canBeDefaultOutput).map(\.uid))
+        let availableUIDs = Set(outputDevices.filter {
+            MixerRoutingSupport.isSelectableSystemOutput($0.uid, canBeDefault: $0.canBeDefaultOutput)
+        }.map(\.uid))
         guard let nextUID = MixerRoutingSupport.nextSelectedOutputDeviceUID(
-            currentUID: currentOutputDeviceUID,
+            currentUID: currentSoundOutputDeviceUID,
             selectedUIDs: selectedUIDs,
             availableUIDs: availableUIDs) else {
             // With an available selection, no next output means the only one is already playing.
@@ -1247,6 +1246,12 @@ final class AppVolumeMixer: ObservableObject {
             }
         }
         return setUniversalOutputDeviceUID(nextUID)
+    }
+
+    var currentSoundOutputDeviceUID: String? {
+        VirtualOutputSupport.logicalOutputUID(current: currentOutputDeviceUID,
+            physical: VirtualOutputService.shared.physicalOutputUID,
+            requested: VirtualOutputService.shared.requestedOutputUID)
     }
 
     func toggleMute(_ app: MixerApp) {

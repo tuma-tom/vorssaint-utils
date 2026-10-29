@@ -216,6 +216,14 @@ enum MixerFeatureTests {
             7,
         ]) == ["BuiltInSpeakerDevice", "ExternalDisplay"],
                "sound output switcher keeps valid unique device ids in order")
+        suite.expect(MixerRoutingSupport.nextSelectedOutputDeviceUID(currentUID: "speakers",
+            selectedUIDs: ["speakers", VirtualOutputSupport.deviceUID, VirtualOutputSupport.legacyDeviceUID, "airpods"],
+            availableUIDs: ["speakers", VirtualOutputSupport.deviceUID, VirtualOutputSupport.legacyDeviceUID, "airpods"]) == "airpods",
+            "cycling skips both current and legacy software drivers even if HAL exposes them")
+        suite.expect(!MixerRoutingSupport.isSelectableSystemOutput(VirtualOutputSupport.deviceUID, canBeDefault: true)
+            && !MixerRoutingSupport.isSelectableSystemOutput(VirtualOutputSupport.loopbackUID, canBeDefault: true)
+            && MixerRoutingSupport.isSelectableSystemOutput("otherVirtual", canBeDefault: true),
+            "system target lists hide only our transport devices and preserve other virtual outputs")
         let savedMixerVolumes = ["com.apple.Safari": 0.35, "com.apple.Music": 1.4]
         let successfulUniversalOutput = MixerRoutingSupport.preferencesAfterUniversalOutputSwitch(
             outputDeviceUIDs: savedRoutes,

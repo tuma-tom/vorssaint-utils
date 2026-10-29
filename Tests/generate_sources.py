@@ -858,27 +858,6 @@ def main():
                          .replace("down.post(tap: .cgSessionEventTap)", "recordReplay(down)")
                          .replace("if let proxy {", "if proxy != nil {")
           + "}\n")
-    write("ZoomTargetRefresh.swift", "import CoreGraphics\nimport Foundation\n"
-          + "extension LinearScrollTapTests.Refresher {\n"
-          + "".join(declaration("Sources/Vorssaint/Services/ScrollInverter.swift", prefix)
-                    .replace("private func", "func", 1)
-                    .replace("AXIsProcessTrusted()", "self.AXIsProcessTrusted()") for prefix in [
-                        "    private func startZoomTargetTimerLocked()",
-                        "    private func stopZoomTargetTimerLocked()"])
-          + "}\n")
-    zoom_post = declaration("Sources/Vorssaint/Services/ScrollInverter.swift", "    private func postKeyboardZoom(")
-    write("ZoomTargetRequest.swift", "import CoreGraphics\nimport Foundation\n"
-          + "extension LinearScrollTapTests.TargetResolver {\n"
-          + "".join(declaration("Sources/Vorssaint/Services/ScrollInverter.swift", prefix)
-                    .replace("private func", "func", 1) for prefix in [
-                        "    private func invalidateZoomTargetLocked()",
-                        "    private func requestZoomTargetLocked("])
-          + "}\n")
-    for name in ["down", "up", "restore"]:
-        zoom_post = zoom_post.replace(f"{name}.postToPid(targetProcessID)", f"recordZoomEvent({name}, to: targetProcessID)")
-    write("ZoomKeyboardPost.swift", "import CoreGraphics\nimport Carbon.HIToolbox\n"
-          + "extension LinearScrollTapTests.Inverter {\n"
-          + zoom_post.replace("private func", "func", 1) + "}\n")
     smooth = "Sources/Vorssaint/Services/SmoothScrollService.swift"
     write("ScrollZoomFocus.swift", "import AppKit\nimport ApplicationServices\n"
           + "extension ScrollZoomFocusTests {\n"
@@ -948,8 +927,26 @@ def main():
               "    private func savedCallAppVolumeEnabled(", "    func setCallAppVolumeControl(",
               "    private func appNeedsEngine(", "    private func rowMayBeTapped(",
               "    private func applyOutputRoute(", "    func setOutputDeviceUID(",
-              "    func switchToNextSoundOutput(", "    func setUniversalOutputDeviceUID(",
+              "    func switchToNextSoundOutput(", "    var currentSoundOutputDeviceUID:", "    func setUniversalOutputDeviceUID(",
               "    private func setDefaultOutputDeviceUID("])
+          + "}\n")
+    switcher = "Sources/Vorssaint/Services/Audio/SoundOutputSwitcher.swift"
+    write("SoundOutputSelections.swift", "import Foundation\n"
+          + "extension MixerUniversalRoutingContract.Switcher {\n"
+          + declaration(switcher, "    func selectedDeviceUIDs()")
+          + declaration(switcher, "    func setSelectedDeviceUIDs(")
+          + declaration(switcher, "    private func migrateSoftwareOutputSelection()").replace("private func", "func", 1) + "}\n")
+    write("AudioPrioritySelection.swift", "import Foundation\n"
+          + "extension MixerUniversalRoutingContract.PriorityHost {\n"
+          + declaration("Sources/Vorssaint/Services/Audio/AudioPriorityService.swift", "    private func enforceOutputPriority()").replace("private func", "func", 1)
+          + "}\n")
+    virtual_service = "Sources/Vorssaint/Services/Audio/VirtualOutputService.swift"
+    route_prefix = "    private func routeOutput("
+    write("VirtualOutputSelection.swift", "import CoreAudio\nimport Foundation\n"
+          + "extension MixerUniversalRoutingContract.SelectionSession {\n"
+          + declaration(virtual_service, "    @discardableResult func selectOutput(")
+          + declaration(virtual_service, route_prefix)
+          + declaration(virtual_service, "    func stop()")
           + "}\n")
     level_watch = declaration(mixer, "final class LevelCompensationWatch {").replace("private ", "")
     for operation in ("AddPropertyListener", "RemovePropertyListener"):
@@ -974,8 +971,10 @@ def main():
           + "}\n")
     write("SoundOutputSwitch.swift", "import Foundation\n"
           + "extension SoundOutputSwitchContract {\nfinal class Mixer {\n"
+          + "typealias VirtualOutputService = MixerUniversalRoutingContract.VirtualOutputService\n"
           + "var outputDevices: [Device] = []\nvar currentOutputDeviceUID: String?\nvar switchedTo: [String] = []\n"
           + "func setUniversalOutputDeviceUID(_ uid: String) -> Bool { switchedTo.append(uid); return true }\n"
+          + declaration(mixer, "    var currentSoundOutputDeviceUID:")
           + declaration(mixer, "    func switchToNextSoundOutput(") + "}\n}\n")
     write("MixerOutputAdjustment.swift", "import CoreAudio\nimport Foundation\n"
           + "extension MixerOutputAdjustmentContract {\nfinal class Mixer {\n"

@@ -35,16 +35,87 @@ enum MixerUniversalRoutingContract {
         func string(forKey key: String) -> String? { values[key] }
         func set(_ value: String?, forKey key: String) { values[key] = value }
         func stringArray(forKey key: String) -> [String]? { arrays[key] }
+        func array(forKey key: String) -> [Any]? { arrays[key] }
+        func removeObject(forKey key: String) { arrays[key] = nil; values[key] = nil }
         func set(_ value: [String], forKey key: String) { arrays[key] = value }
     }
 
     final class VirtualOutputService {
         static let shared = VirtualOutputService()
         var isActive = false
+        var isStarting = false
         var selectedUIDs: [String] = []
-        func selectPhysicalOutput(_ uid: String) -> Bool { selectedUIDs.append(uid); return true }
+        var physicalOutputUID: String?
+        var requestedOutputUID: String?
+        var rejectedUIDs: Set<String> = []
+        func selectOutput(_ uid: String) -> Bool {
+            guard isActive || isStarting || requestedOutputUID != nil, !rejectedUIDs.contains(uid) else { return false }
+            selectedUIDs.append(uid); requestedOutputUID = uid; return true
+        }
+    }
+    final class Switcher {
+        typealias UserDefaults = Preferences
+        typealias VirtualOutputService = MixerUniversalRoutingContract.VirtualOutputService
+        var lastSwitchFailed = false
+    }
+    final class DeferredQueue {
+        var pending: [() -> Void] = []
+        func async(execute: @escaping () -> Void) { pending.append(execute) }
+        func flush() { while !pending.isEmpty { pending.removeFirst()() } }
+        func sync(execute: () -> Void) { flush(); execute() }
+    }
+    enum SelectionQueues { static let main = DeferredQueue() }
+    enum SelectionHAL {
+        static var current = VirtualOutputSupport.deviceUID
+        static var nativeSelections: [String] = []
+        static var systemCurrent = "alerts"
+        static func physicalDevices() -> [(uid: String, id: AudioObjectID)] { [("fixed",1),("nativeA",2),("nativeB",3)] }
+        static func hasHardwareVolume(_ uid: String) -> Bool { uid.hasPrefix("native") }
+        static func restorableOutputs(systemSounds: Bool) -> [String] { ["fixed", "nativeA", "nativeB", "externalVirtual"] }
+        static func componentDevice() -> AudioObjectID? { 99 }
+        static func uid(_ device: AudioObjectID) -> String? { VirtualOutputSupport.deviceUID }
+        static func defaultUID(_ selector: AudioObjectPropertySelector = kAudioHardwarePropertyDefaultOutputDevice) -> String? { selector == kAudioHardwarePropertyDefaultSystemOutputDevice ? systemCurrent : current }
+        static func select(_ uid: String, selector: AudioObjectPropertySelector = kAudioHardwarePropertyDefaultOutputDevice) -> Bool {
+            if selector == kAudioHardwarePropertyDefaultOutputDevice { current = uid; nativeSelections.append(uid) }
+            else if selector == kAudioHardwarePropertyDefaultSystemOutputDevice { systemCurrent = uid }
+            return true
+        }
+    }
+    final class SelectionSession {
+        typealias VirtualOutputHAL = SelectionHAL
+        typealias DispatchQueue = SelectionQueues
+        struct Bridge { let physicalUID: String }
+        var queue = DeferredQueue()
+        var isActive = true, isStarting = false, isRemoving = false, suspended = false
+        var acceptsOutputSelections = true
+        var physicalOutputUID: String? = "fixed"
+        var requestedOutputUID: String?
+        let outputRequests = VirtualOutputSupport.OutputRequests()
+        var previousOutput: String?, previousSystemOutput: String?
+        var virtual: AudioObjectID? = 99
+        var virtualUID = VirtualOutputSupport.deviceUID
+        var bridge: Bridge? = Bridge(physicalUID: "fixed")
+        var errors: [VirtualOutputSupport.Issue] = []
+        func deactivate() {
+            if virtual != nil, SelectionHAL.current == virtualUID { SelectionHAL.current = previousOutput ?? "nativeA" }
+            virtual = nil; bridge = nil; physicalOutputUID = nil; isActive = false
+        }
+        func replaceBridge(physicalUID: String) {
+            guard virtual != nil else { return }
+            self.physicalOutputUID = physicalUID; bridge = Bridge(physicalUID: physicalUID)
+            SelectionHAL.current = virtualUID; isActive = true
+        }
+        func publish(error: VirtualOutputSupport.Issue) { errors.append(error) }
+    }
+    final class PriorityHost {
+        typealias AppVolumeMixer = Mixer
+        var unplacedOutputUIDs: Set<String> = []
+        var outputPriorityUIDs: [String] = []
     }
     final class Mixer {
+        static let shared = Mixer()
+        var prioritySelections: [String] = []
+        func setPriorityOutputDeviceUID(_ uid: String) { prioritySelections.append(uid) }
         typealias VirtualOutputService = MixerUniversalRoutingContract.VirtualOutputService
         typealias MixerApp = MixerUniversalRoutingContract.MixerApp
         typealias L10n = MixerUniversalRoutingContract.L10n
@@ -227,6 +298,111 @@ enum MixerUniversalRoutingContract {
                      && Mixer.writes[0].1 == kAudioHardwarePropertyDefaultOutputDevice,
                      "universal selection writes only the requested default output")
 
+        SelectionHAL.current = VirtualOutputSupport.deviceUID
+        let queued = SelectionSession()
+        let acceptedNative = queued.selectOutput("nativeA")
+        queued.queue.pending.removeFirst()()
+        suite.expect(acceptedNative && queued.selectOutput("fixed"),
+                     "rapid native/fixed choices are both accepted")
+        suite.expect(queued.requestedOutputUID == "fixed", "latest accepted output remains the logical cycling target")
+        SelectionQueues.main.flush()
+        suite.expect(queued.requestedOutputUID == "fixed", "completion of an older selection cannot clear the newer pending choice")
+        queued.queue.flush(); SelectionQueues.main.flush()
+        suite.expect(queued.requestedOutputUID == nil, "completed latest selection clears its pending logical target")
+        suite.expect(SelectionHAL.current == VirtualOutputSupport.deviceUID && queued.bridge?.physicalUID == "fixed",
+                     "queued fixed selection reacquires a bridge after an earlier native choice released it")
+        SelectionHAL.current = VirtualOutputSupport.deviceUID
+        let queuedNative = SelectionSession()
+        _ = queuedNative.selectOutput("nativeA"); _ = queuedNative.selectOutput("nativeB")
+        queuedNative.queue.flush(); SelectionQueues.main.flush()
+        suite.expect(SelectionHAL.current == "nativeB", "successive queued native choices select the final actual hardware output")
+
+        SelectionHAL.current = VirtualOutputSupport.deviceUID
+        SelectionHAL.nativeSelections = []
+        let coalesced = SelectionSession()
+        _ = coalesced.selectOutput("nativeA"); _ = coalesced.selectOutput("nativeB"); _ = coalesced.selectOutput("fixed")
+        coalesced.queue.flush(); SelectionQueues.main.flush()
+        suite.expect(SelectionHAL.nativeSelections.isEmpty && SelectionHAL.current == VirtualOutputSupport.deviceUID,
+                     "superseded queued output choices do not reconfigure hardware or interrupt audio")
+
+        SelectionHAL.current = VirtualOutputSupport.deviceUID
+        SelectionHAL.nativeSelections = []
+        let stoppedSelection = SelectionSession()
+        _ = stoppedSelection.selectOutput("nativeA")
+        stoppedSelection.stop(); SelectionQueues.main.flush()
+        suite.expect(stoppedSelection.requestedOutputUID == nil && SelectionHAL.nativeSelections.isEmpty
+                     && !stoppedSelection.selectOutput("nativeB"),
+                     "stopping cancels queued selections and cannot recreate a disabled bridge")
+
+        SelectionHAL.current = "nativeA"; SelectionHAL.systemCurrent = "alerts"
+        let coldNative = SelectionSession()
+        coldNative.isActive = false; coldNative.virtual = nil; coldNative.bridge = nil
+        suite.expect(coldNative.selectOutput("nativeB"), "enabled fallback serializes native selections even before a bridge is active")
+        coldNative.queue.flush(); SelectionQueues.main.flush()
+        suite.expect(SelectionHAL.current == "nativeB" && SelectionHAL.systemCurrent == "alerts",
+                     "a native-only selection leaves an independently chosen alert output unchanged")
+        SelectionHAL.current = "nativeA"; SelectionHAL.systemCurrent = "alerts"
+        let coldFixed = SelectionSession()
+        coldFixed.isActive = false; coldFixed.virtual = nil; coldFixed.bridge = nil
+        suite.expect(coldFixed.selectOutput("fixed"), "fixed output is prepared before switching the default from native playback")
+        coldFixed.queue.flush(); SelectionQueues.main.flush()
+        suite.expect(coldFixed.bridge?.physicalUID == "fixed" && coldFixed.previousSystemOutput == "alerts",
+                     "starting fallback from native output preserves the previous alert destination for restoration")
+
+        SelectionHAL.current = VirtualOutputSupport.deviceUID
+        let queuedForeign = SelectionSession()
+        _ = queuedForeign.selectOutput("nativeA"); _ = queuedForeign.selectOutput("externalVirtual")
+        queuedForeign.queue.flush(); SelectionQueues.main.flush()
+        suite.expect(SelectionHAL.current == "externalVirtual" && queuedForeign.bridge == nil,
+                     "an external output chosen after a queued physical choice remains the final native output")
+
+        VirtualOutputService.shared.physicalOutputUID = "speakers"
+        VirtualOutputService.shared.requestedOutputUID = nil
+        Mixer.shared.outputDevices = [Device(uid: "speakers", canBeDefaultOutput: true, audioObjectID: 10), Device(uid: "airpods", canBeDefaultOutput: true, audioObjectID: 20), Device(uid: VirtualOutputSupport.deviceUID, canBeDefaultOutput: true, audioObjectID: 99)]
+        Mixer.shared.currentOutputDeviceUID = VirtualOutputSupport.deviceUID
+        Mixer.shared.prioritySelections = []
+        let priorityHost = PriorityHost()
+        priorityHost.outputPriorityUIDs = [VirtualOutputSupport.deviceUID, "airpods", "speakers"]
+        priorityHost.enforceOutputPriority()
+        suite.expect(Mixer.shared.prioritySelections == ["airpods"], "automatic output priority also excludes the implementation driver")
+        Mixer.shared.prioritySelections = []
+        priorityHost.outputPriorityUIDs = ["speakers", "airpods"]
+        priorityHost.enforceOutputPriority()
+        suite.expect(Mixer.shared.prioritySelections.isEmpty, "priority compares the physical fallback target rather than repeatedly choosing its virtual wrapper")
+        VirtualOutputService.shared.physicalOutputUID = nil
+
+        let softwareUID = VirtualOutputSupport.deviceUID
+        Preferences.standard.arrays[DefaultsKey.soundOutputSwitcherDeviceUIDs] = [softwareUID, VirtualOutputSupport.legacyDeviceUID, VirtualOutputSupport.loopbackUID, "airpods"]
+        suite.expect(Switcher().selectedDeviceUIDs() == ["airpods"],
+                     "saved implementation devices never become output-switcher targets")
+        Preferences.standard.values[DefaultsKey.softwareVolumePhysicalOutputUID] = "speakers"
+        let selection = Switcher()
+        selection.migrateSoftwareOutputSelection()
+        suite.expect(Preferences.standard.arrays[DefaultsKey.soundOutputSwitcherDeviceUIDs] == ["speakers", "airpods"],
+                     "stored current/legacy driver choices migrate once to the physical speaker without duplicates")
+        selection.setSelectedDeviceUIDs(["airpods", softwareUID, VirtualOutputSupport.loopbackUID])
+        suite.expect(selection.selectedDeviceUIDs() == ["airpods"], "new saved choices cannot reintroduce an internal device")
+        Preferences.standard.arrays = [:]
+        Preferences.standard.values = [:]
+        let fallbackCycle = Mixer()
+        fallbackCycle.outputDevices.append(Device(uid: softwareUID, canBeDefaultOutput: true, audioObjectID: 99))
+        fallbackCycle.currentOutputDeviceUID = softwareUID
+        VirtualOutputService.shared.isActive = true
+        VirtualOutputService.shared.physicalOutputUID = "speakers"
+        VirtualOutputService.shared.selectedUIDs = []
+        suite.expect(fallbackCycle.switchToNextSoundOutput(in: ["speakers", "airpods", softwareUID])
+                     && VirtualOutputService.shared.selectedUIDs == ["airpods"],
+                     "shortcut advances from the actual speaker behind the software output and skips the driver")
+        suite.expect(fallbackCycle.switchToNextSoundOutput(in: ["speakers", "airpods", softwareUID])
+                     && VirtualOutputService.shared.selectedUIDs.suffix(2) == ["airpods", "speakers"],
+                     "rapid shortcut presses advance from the accepted target before HAL refresh")
+        suite.expect(!fallbackCycle.switchToNextSoundOutput(in: [softwareUID, VirtualOutputSupport.legacyDeviceUID]),
+                     "implementation-only saved selection is not a playable cycle")
+        VirtualOutputService.shared.isActive = false
+        VirtualOutputService.shared.physicalOutputUID = nil
+        VirtualOutputService.shared.requestedOutputUID = nil
+        VirtualOutputService.shared.selectedUIDs = []
+
         let nativeMixer = Mixer()
         VirtualOutputService.shared.isActive = true
         let oldWrites = Mixer.writes.count
@@ -234,7 +410,14 @@ enum MixerUniversalRoutingContract {
                      && VirtualOutputService.shared.selectedUIDs.last == "airpods"
                      && Mixer.writes.count == oldWrites,
                      "native fallback switches the bridge target without replacing the virtual default behind its owner")
+        suite.expect(nativeMixer.currentOutputDeviceUID == "airpods", "accepted bridge switch publishes the logical choice for rapid shortcuts")
+        nativeMixer.outputDevices.append(Device(uid: "externalVirtual", canBeDefaultOutput: true, audioObjectID: 30))
+        VirtualOutputService.shared.rejectedUIDs = ["externalVirtual"]
+        suite.expect(nativeMixer.setDefaultOutputDeviceUID("externalVirtual") && Mixer.writes.last?.0 == 30,
+                     "an external virtual device still uses native selection when it is not a physical bridge target")
+        VirtualOutputService.shared.rejectedUIDs = []
         VirtualOutputService.shared.isActive = false
+        VirtualOutputService.shared.requestedOutputUID = nil
         VirtualOutputService.shared.selectedUIDs = []
 
         mixer.volumes = [:]

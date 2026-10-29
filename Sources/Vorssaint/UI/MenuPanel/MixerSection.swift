@@ -678,31 +678,34 @@ struct MixerOptionsControls: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if showComponentManagement {
-                Button(nativeStrings.privacyTitle) { showAudioPrivacy = true }
-                    .buttonStyle(.link)
-                    .font(.system(size: 10.5))
-                    .alert(nativeStrings.privacyTitle, isPresented: $showAudioPrivacy) {
-                        Button("OK", role: .cancel) {}
-                    } message: {
-                        Text(nativeStrings.privacyBody)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Button(nativeStrings.privacyTitle) { showAudioPrivacy = true }
+                        .buttonStyle(.link)
+                        .font(.system(size: 10.5))
+                        .alert(nativeStrings.privacyTitle, isPresented: $showAudioPrivacy) {
+                            Button("OK", role: .cancel) {}
+                        } message: {
+                            Text(nativeStrings.privacyBody)
+                        }
+                    if virtualOutput.componentPresent {
+                        Button(nativeStrings.remove) { showSoftwareVolumeRemoval = true }
+                            .buttonStyle(.link)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .disabled(virtualOutput.isRemoving)
+                            .alert(nativeStrings.removeTitle, isPresented: $showSoftwareVolumeRemoval) {
+                                Button(nativeStrings.remove, role: .destructive) { virtualOutput.removeComponent() }
+                                Button(l10n.s.uninstallerCancel, role: .cancel) {}
+                            } message: {
+                                Text(nativeStrings.removeBody)
+                            }
                     }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             if softwareVolumeEnabled, !virtualOutput.componentReady {
                 Button(nativeStrings.install) { showSoftwareVolumeInstaller = true }
                     .buttonStyle(.link)
                     .font(.system(size: 10.5, weight: .medium))
-            }
-            if showComponentManagement, virtualOutput.componentPresent {
-                Button(nativeStrings.remove) { showSoftwareVolumeRemoval = true }
-                    .buttonStyle(.link)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .disabled(virtualOutput.isRemoving)
-                    .alert(nativeStrings.removeTitle, isPresented: $showSoftwareVolumeRemoval) {
-                        Button(nativeStrings.remove, role: .destructive) { virtualOutput.removeComponent() }
-                        Button(l10n.s.uninstallerCancel, role: .cancel) {}
-                    } message: {
-                        Text(nativeStrings.removeBody)
-                    }
             }
             if let message = virtualOutput.error {
                 inputMessage(message, systemImage: "exclamationmark.triangle")
@@ -851,6 +854,7 @@ struct SoundOutputSwitcherControls: View {
     @ObservedObject private var l10n = L10n.shared
     @ObservedObject private var mixer = AppVolumeMixer.shared
     @ObservedObject private var outputSwitcher = SoundOutputSwitcher.shared
+    @ObservedObject private var virtualOutput = VirtualOutputService.shared
     @AppStorage(DefaultsKey.soundOutputSwitcherEnabled)
     private var enabled = false
     @State private var selectedUIDs: [String] = []
@@ -862,7 +866,7 @@ struct SoundOutputSwitcherControls: View {
                 .font(.system(size: 11.5, weight: .medium))
                 .onChange(of: enabled) { _, isEnabled in
                     if isEnabled, selectedUIDs.isEmpty,
-                       let current = mixer.currentOutputDeviceUID,
+                       let current = currentOutputUID,
                        universalOutputDevices.contains(where: { $0.uid == current }) {
                         setSelectedUIDs([current])
                     }
@@ -918,11 +922,18 @@ struct SoundOutputSwitcherControls: View {
     }
 
     private var universalOutputDevices: [MixerOutputDevice] {
-        mixer.outputDevices.filter(\.canBeDefaultOutput)
+        mixer.outputDevices.filter {
+            MixerRoutingSupport.isSelectableSystemOutput($0.uid, canBeDefault: $0.canBeDefaultOutput)
+        }
+    }
+
+    private var currentOutputUID: String? {
+        VirtualOutputSupport.logicalOutputUID(current: mixer.currentOutputDeviceUID,
+            physical: virtualOutput.physicalOutputUID, requested: virtualOutput.requestedOutputUID)
     }
 
     private func outputDeviceTitle(_ device: MixerOutputDevice) -> String {
-        device.isDefault ? "\(device.name) (\(l10n.s.mixerOutputCurrent))" : device.name
+        device.uid == currentOutputUID ? "\(device.name) (\(l10n.s.mixerOutputCurrent))" : device.name
     }
 
     private func inputMessage(_ text: String, systemImage: String) -> some View {

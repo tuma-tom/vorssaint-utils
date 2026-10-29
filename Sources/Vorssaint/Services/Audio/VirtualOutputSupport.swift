@@ -4,6 +4,21 @@ import CoreAudio
 import Foundation
 
 enum VirtualOutputSupport {
+    /// Synchronizes the latest UI request with the serial HAL queue. No lock is
+    /// held while calling Core Audio or while dispatching to the main queue.
+    final class OutputRequests {
+        private let lock = NSLock()
+        private var latest = UUID()
+        func next() -> UUID {
+            lock.lock(); defer { lock.unlock() }
+            latest = UUID()
+            return latest
+        }
+        func isCurrent(_ request: UUID) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return latest == request
+        }
+    }
     static let deviceUID = "VorssaintAudio_UID"
     static let loopbackUID = "VorssaintAudio_2_UID"
     // Compatibility with the local prototype already installed on this Mac.
@@ -11,6 +26,17 @@ enum VirtualOutputSupport {
     static let legacyDeviceUID = "VorssaintAudioFork_UID"
     static func isSoftwareOutput(_ uid: String?) -> Bool { uid == deviceUID || uid == legacyDeviceUID }
     static func isSoftwareDevice(_ uid: String?) -> Bool { isSoftwareOutput(uid) || uid == loopbackUID }
+    static func logicalOutputUID(current: String?, physical: String?, requested: String? = nil) -> String? {
+        requested ?? (isSoftwareOutput(current) ? physical : current)
+    }
+    static func migratedOutputSelection(_ uids: [String], physical: String?) -> [String] {
+        var seen = Set<String>()
+        return uids.compactMap { uid in
+            let target = isSoftwareOutput(uid) ? physical : uid
+            guard let target, !target.isEmpty, !isSoftwareDevice(target), seen.insert(target).inserted else { return nil }
+            return target
+        }
+    }
     static let ownerSelector: AudioObjectPropertySelector = 0x766f776e
     static let activeSelector: AudioObjectPropertySelector = 0x76616374
 
