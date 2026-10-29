@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Vorssaint Audio contributors
+import AppKit
+import Combine
+import CoreAudio
+
+/// Owns one virtual-output session. HAL calls and bridge construction serialize
+/// off-main; only published presentation state is changed on the main queue.
+final class VirtualOutputService: ObservableObject {
+    static let shared = VirtualOutputService()
+    @Published private(set) var isActive = false
+    @Published private(set) var isStarting = false
+    @Published private(set) var componentReady = false
+    @Published private(set) var componentPresent = false
+    @Published private(set) var isRemoving = false
+    @Published private(set) var physicalOutputUID: String?
+    @Published private(set) var error: String?
+    var isInstalled: Bool { VirtualOutputHAL.componentDevice() != nil }
+    private let queue = DispatchQueue(label: "com.vorssaint.utils.software-volume.lifecycle", qos: .userInitiated)
+    private var bridge: VirtualOutputBridge?
+    private var timer: DispatchSourceTimer?
+    private var virtual: AudioObjectID?
+    private var virtualUID = VirtualOutputSupport.deviceUID
+    private var ownsVirtualOutput = false
+    private var previousOutput: String?
+    private var previousSystemOutput: String?
+    private var lastCycles: Int64 = 0
+    private var lastProgress = ProcessInfo.processInfo.systemUptime
+    private var suspended = false
+    private var enableAfterInstall = false
+
+    func sync(enabled: Bool) {
+        queue.async { [self] in
+            let device = VirtualOutputHAL.componentDevice()
+            let present = VirtualOutputHAL.installedComponentExists()
+            DispatchQueue.main.async {
+                if self.componentReady != (device != nil) { self.componentReady = device != nil }
+                if self.componentPresent != present { self.componentPresent = present }
+                if device != nil, self.enableAfterInstall {
+                    self.enableAfterInstall = false
+                    UserDefaults.standard.set(true, forKey: DefaultsKey.mixerSoftwareVolumeEnabled)
+                    AppVolumeMixer.shared.syncSoftwareOutputWithPreferences()
+                }
+            }
+            guard enabled else {
+                suspended = false
+                if bridge != nil || virtual != nil { deactivate() }
+                return
+            }
+            guard let device else { return }
+            if let bridge {
+                let current = VirtualOutputHAL.defaultUID()
+                if current != virtualUID {
+                    if let current, VirtualOutputHAL.physicalDevices().contains(where: { $0.uid == current }) {
+                        previousOutput = current
+                        previousSystemOutput = current
+                        if VirtualOutputHAL.hasHardwareVolume(current) {
+                            deactivate()
+                        } else {
+                            replaceBridge(physicalUID: current)
+                        }
+                    } else {
+                        deactivate(); suspended = false
+                    }
+                } else if !bridge.configurationIsCurrent() {
+                    if VirtualOutputHAL.physicalDevices().contains(where: { $0.uid == bridge.physicalUID }) {
+                        replaceBridge(physicalUID: bridge.physicalUID)
+                    } else {
+                        deactivate(); suspended = false
+                        publish(error: .outputUnavailable)
+                    }
+                }
+                return
+            }
+            let physicals = VirtualOutputHAL.physicalDevices()
+            let current = VirtualOutputHAL.defaultUID()
+            if let current, !VirtualOutputSupport.isSoftwareOutput(current) {
+                if VirtualOutputHAL.hasHardwareVolume(current) { suspended = false; return }
+                // A different virtual device belongs to another audio app.
+                guard physicals.contains(where: { $0.uid == current }) else { return }
+            }
+            guard !suspended else { return }
+            let saved = UserDefaults.standard.string(forKey: DefaultsKey.softwareVolumePhysicalOutputUID)
+            guard let target = physicals.first(where: { $0.uid == current })?.uid
+                    ?? physicals.first(where: { $0.uid == saved })?.uid
+                    ?? physicals.first?.uid else {
+                publish(error: .outputUnavailable); return
+            }
+            guard VirtualOutputSupport.usesVirtualOutput(enabled: enabled,
+                hardwareVolume: VirtualOutputHAL.hasHardwareVolume(target)) else { return }
+            virtual = device
+            virtualUID = VirtualOutputHAL.uid(device) ?? VirtualOutputSupport.deviceUID
+            previousOutput = VirtualOutputSupport.isSoftwareOutput(current) ? target : current
+            previousSystemOutput = VirtualOutputHAL.defaultUID(kAudioHardwarePropertyDefaultSystemOutputDevice)
+            replaceBridge(physicalUID: target)
+        }
+    }
+    @discardableResult func selectPhysicalOutput(_ uid: String) -> Bool {
+        guard isActive || isStarting,
+              VirtualOutputHAL.physicalDevices().contains(where: { $0.uid == uid }) else { return false }
+        if physicalOutputUID == uid { return true }
+        queue.async { [self] in
+            suspended = false
+            // A user output selection becomes the output restored on disable.
+            previousOutput = uid
+            previousSystemOutput = uid
+            if VirtualOutputHAL.hasHardwareVolume(uid) { deactivate() }
+            else { replaceBridge(physicalUID: uid) }
+        }
+        return true
+    }
+    func stop() {
+        queue.sync { deactivate() }
+    }
+    func installForFallback() {
+        guard !isRemoving else { return }
+        enableAfterInstall = true
+        if !openInstaller() { enableAfterInstall = false }
+    }
+    @discardableResult func openInstaller() -> Bool {
+        guard let installer = Bundle.main.url(forResource: "VorssaintAudio", withExtension: "pkg") else {
+            error = VirtualOutputStrings.localized(L10n.shared.language).message(.installerMissing)
+            return false
+        }
+        return NSWorkspace.shared.open(installer)
+    }
+    /// Disable and restore playback before requesting root removal. Cancelling
+    /// authorization keeps the driver installed and the ordinary mixer usable.
+    func removeComponent(completion: ((Bool) -> Void)? = nil) {
+        guard !isRemoving else { completion?(false); return }
+        enableAfterInstall = false
+        guard let script = Bundle.main.url(forResource: "uninstall-software-volume-driver", withExtension: "sh") else {
+            error = VirtualOutputStrings.localized(L10n.shared.language).message(.removalFailed)
+            completion?(false)
+            return
+        }
+        isRemoving = true
+        UserDefaults.standard.set(false, forKey: DefaultsKey.mixerSoftwareVolumeEnabled)
+        let command = "/bin/zsh '" + script.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        queue.async { [self] in
+            deactivate()
+            DispatchQueue.main.async {
+                AdminShell.run(command, prompt: VirtualOutputStrings.localized(L10n.shared.language).removeTitle) { success in
+                    DispatchQueue.main.async {
+                        self.isRemoving = false
+                        self.componentReady = self.isInstalled
+                        self.componentPresent = VirtualOutputHAL.installedComponentExists()
+                        let removed = success && !self.componentPresent
+                        self.error = removed ? nil : VirtualOutputStrings.localized(L10n.shared.language).message(.removalFailed)
+                        if removed {
+                            UserDefaults.standard.removeObject(forKey: DefaultsKey.mixerSoftwareVolumes)
+                            UserDefaults.standard.removeObject(forKey: DefaultsKey.softwareVolumePhysicalOutputUID)
+                        }
+                        completion?(removed)
+                    }
+                }
+            }
+        }
+    }
+    private func publish(error issue: VirtualOutputSupport.Issue? = nil) {
+        let active = bridge != nil, uid = bridge?.physicalUID
+        DispatchQueue.main.async {
+            self.isActive = active
+            self.isStarting = false
+            self.physicalOutputUID = uid
+            self.error = issue.map { VirtualOutputStrings.localized(L10n.shared.language).message($0) }
+            AppVolumeMixer.shared.refreshApps()
+        }
+    }
+    private func replaceBridge(physicalUID: String) {
+        guard let virtual else { return }
+        DispatchQueue.main.async { self.isStarting = true; self.error = nil }
+        rememberLevel()
+        timer?.cancel(); timer = nil
+        // Keep the virtual default during a format change. It stays silent
+        // until the replacement bridge is ready, avoiding a raw-volume spike.
+        bridge?.stop(); bridge = nil
+        guard VirtualOutputHAL.write(virtual, VirtualOutputSupport.ownerSelector, value: kCFBooleanTrue!) == noErr else {
+            deactivate(); suspended = true
+            publish(error: .inUse)
+            return
+        }
+        ownsVirtualOutput = true
+        do {
+            let next = try VirtualOutputBridge(virtual: virtual, physicalUID: physicalUID)
+            bridge = next
+            let levels = UserDefaults.standard.dictionary(forKey: DefaultsKey.mixerSoftwareVolumes)
+            let level = MixerSoftwareVolumeSupport.savedLevel(levels?[physicalUID])
+            guard VirtualOutputHAL.setOutputLevel(virtual, level: level) else {
+                throw VirtualOutputBridge.Failure("Could not initialize native master volume")
+            }
+            _ = VirtualOutputHAL.write(virtual, kAudioDevicePropertyMute, value: UInt32(level == 0 ? 1 : 0), scope: kAudioObjectPropertyScopeOutput)
+            guard VirtualOutputHAL.select(virtualUID) else {
+                throw VirtualOutputBridge.Failure("Could not select the Vorssaint Audio system output")
+            }
+            // Route alerts and sound effects through the same native mute.
+            guard VirtualOutputHAL.select(virtualUID, selector: kAudioHardwarePropertyDefaultSystemOutputDevice) else {
+                throw VirtualOutputBridge.Failure("Could not route system sound effects")
+            }
+            UserDefaults.standard.set(physicalUID, forKey: DefaultsKey.softwareVolumePhysicalOutputUID)
+            lastCycles = next.progress.cycles
+            lastProgress = ProcessInfo.processInfo.systemUptime
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in self?.heartbeat() }
+            self.timer = timer
+            timer.resume()
+            publish()
+        } catch {
+            deactivate(); suspended = true
+            publish(error: (error as? VirtualOutputBridge.Failure)?.issue ?? .setupFailed)
+        }
+    }
+    private func heartbeat() {
+        guard let bridge, let virtual else { return }
+        let now = ProcessInfo.processInfo.systemUptime, cycles = bridge.progress.cycles
+        guard bridge.configurationIsCurrent() else {
+            // The next sync either rebuilds for a changed format or restores
+            // a remaining physical output after a disconnection.
+            DispatchQueue.main.async { self.sync(enabled: true) }
+            return
+        }
+        rememberLevel()
+        if cycles != lastCycles {
+            lastCycles = cycles; lastProgress = now
+            guard VirtualOutputHAL.write(virtual, VirtualOutputSupport.ownerSelector, value: kCFBooleanTrue!) == noErr else {
+                deactivate(); suspended = true
+                publish(error: .stopped)
+                return
+            }
+        } else if now - lastProgress > 3 {
+            deactivate(); suspended = true
+            publish(error: .stopped)
+        }
+    }
+    private func rememberLevel() {
+        guard ownsVirtualOutput, let virtual, let uid = bridge?.physicalUID,
+              let level = VirtualOutputHAL.outputLevel(virtual) else { return }
+        var muted: UInt32 = 0
+        _ = VirtualOutputHAL.read(virtual, kAudioDevicePropertyMute, into: &muted, scope: kAudioObjectPropertyScopeOutput)
+        let value = muted != 0 ? 0 : level
+        var saved = UserDefaults.standard.dictionary(forKey: DefaultsKey.mixerSoftwareVolumes) ?? [:]
+        if (saved[uid] as? NSNumber)?.doubleValue != value {
+            saved[uid] = value
+            UserDefaults.standard.set(saved, forKey: DefaultsKey.mixerSoftwareVolumes)
+        }
+    }
+    private func deactivate() {
+        rememberLevel()
+        timer?.cancel(); timer = nil
+        let physicals = VirtualOutputHAL.physicalDevices().map(\.uid)
+        if let restore = VirtualOutputSupport.restoreUID(current: VirtualOutputHAL.defaultUID(), virtual: virtualUID,
+                                                        previous: previousOutput, available: VirtualOutputHAL.restorableOutputs(systemSounds: false),
+                                                        fallback: physicals, owned: ownsVirtualOutput) {
+            _ = VirtualOutputHAL.select(restore)
+        }
+        if let restore = VirtualOutputSupport.restoreUID(current: VirtualOutputHAL.defaultUID(kAudioHardwarePropertyDefaultSystemOutputDevice),
+                                                        virtual: virtualUID, previous: previousSystemOutput,
+                                                        available: VirtualOutputHAL.restorableOutputs(systemSounds: true), fallback: physicals, owned: ownsVirtualOutput) {
+            _ = VirtualOutputHAL.select(restore, selector: kAudioHardwarePropertyDefaultSystemOutputDevice)
+        }
+        bridge?.stop(); bridge = nil
+        if ownsVirtualOutput, let virtual {
+            _ = VirtualOutputHAL.write(virtual, VirtualOutputSupport.ownerSelector, value: kCFBooleanFalse!)
+        }
+        ownsVirtualOutput = false
+        virtual = nil
+        previousOutput = nil; previousSystemOutput = nil
+        publish()
+    }
+}

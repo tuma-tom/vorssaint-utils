@@ -15,6 +15,13 @@ struct MixerOutputPreferences: Equatable {
     let volumes: [String: Double]
 }
 
+enum MixerSoftwareVolumeSupport {
+    static func savedLevel(_ value: Any?) -> Double {
+        guard let value = value as? NSNumber, value.doubleValue.isFinite else { return 0.5 }
+        return min(1, max(0, value.doubleValue))
+    }
+}
+
 /// How a mixer row is identified.
 struct MixerRowIdentity: Equatable {
     /// Identifies the row in the list and its engine. Always present.

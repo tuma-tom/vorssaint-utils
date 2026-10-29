@@ -288,6 +288,7 @@ final class AppVolumeMixer: ObservableObject {
     /// Tears every tap down so all apps return to untouched system output, and
     /// hands back the one system setting the mixer changes on its own.
     func stopAll() {
+        VirtualOutputService.shared.stop()
         stopped = true
         builds.invalidateAll()
         for engine in engines.values { engine.stop() }
@@ -698,6 +699,12 @@ final class AppVolumeMixer: ObservableObject {
         outputControlLock.withLock {
             outputControlLifetime == adjustment.lifetime && outputKeyGeneration == adjustment.keyGeneration
         }
+    }
+
+    /// Keep hardware volume native and use the virtual path only for fixed outputs.
+    func syncSoftwareOutputWithPreferences() {
+        VirtualOutputService.shared.sync(enabled: AppFeature.mixer.isAvailable
+            && UserDefaults.standard.bool(forKey: DefaultsKey.mixerSoftwareVolumeEnabled))
     }
 
     private func drainOutputAdjustment() {
@@ -1117,6 +1124,10 @@ final class AppVolumeMixer: ObservableObject {
     /// universal picker, this must not erase explicit per-app routes or
     /// block the main thread while a device is being reconfigured.
     func setPriorityOutputDeviceUID(_ uid: String) {
+        if VirtualOutputService.shared.isActive {
+            _ = VirtualOutputService.shared.selectPhysicalOutput(uid)
+            return
+        }
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: {
                   $0.uid == sanitized && $0.canBeDefaultOutput
@@ -1149,6 +1160,9 @@ final class AppVolumeMixer: ObservableObject {
 
     @discardableResult
     private func setDefaultOutputDeviceUID(_ uid: String) -> Bool {
+        if VirtualOutputService.shared.isActive, !VirtualOutputSupport.isSoftwareOutput(uid) {
+            return VirtualOutputService.shared.selectPhysicalOutput(uid)
+        }
         guard let sanitized = Defaults.sanitizedAppOutputDeviceUID(uid),
               let device = outputDevices.first(where: { $0.uid == sanitized && $0.canBeDefaultOutput }) else {
             outputSwitchError = L10n.shared.s.mixerOutputUnavailable
@@ -1178,6 +1192,7 @@ final class AppVolumeMixer: ObservableObject {
         sessionRoutes.removeAll()
         // A second shortcut press can precede the HAL snapshot. Cycle from
         // the successful choice, while the per-app routes await that read.
+        PreciseVolumeRollerService.shared.syncWithPreferences()
         currentOutputDeviceUID = device.uid
 
         // Builds started for the previous device can no longer be installed;
@@ -1643,6 +1658,7 @@ final class AppVolumeMixer: ObservableObject {
         }
         subscribeToOutputControls(of: snapshot.defaultDeviceID)
         applyOutputControls(volume: snapshot.systemOutputVolume, muted: snapshot.systemOutputMuted)
+        syncSoftwareOutputWithPreferences()
 
         guard let readApps = snapshot.apps else {
             if !apps.isEmpty {
@@ -2483,10 +2499,11 @@ final class AppVolumeMixer: ObservableObject {
             guard !uid.isEmpty else { continue }
 
             var nameRef: CFString = "" as CFString
-            let name = read(deviceID, kAudioObjectPropertyName, &nameRef)
+            var name = read(deviceID, kAudioObjectPropertyName, &nameRef)
                 ? nameRef as String
                 : uid
-            guard !MicMuteSupport.isOwnDevice(name: name) else { continue }
+            if VirtualOutputSupport.isSoftwareOutput(uid) { name = "Vorssaint Audio" }
+            guard !MicMuteSupport.isOwnDevice(name: name) || VirtualOutputSupport.isSoftwareOutput(uid) else { continue }
             let dataSourceName = outputDataSourceName(for: deviceID)
             let terminalTypes: [UInt32] = streams.compactMap { stream in
                 var terminal: UInt32 = kAudioStreamTerminalTypeUnknown
@@ -3470,7 +3487,8 @@ private final class TapGainEngine: GainEngine {
             return nil
         }
 
-        guard configuration.start() else {
+        guard VirtualOutputHAL.isolateProcessTapInput(aggregateID, ioProc: ioProc, physicalUID: outputDeviceUID),
+              configuration.start() else {
             stop()
             return nil
         }
@@ -3748,7 +3766,8 @@ private final class AirPlayGainEngine: GainEngine {
         startWatchingSampleRate()
         levelWatch?.waitForFirstRead()
 
-        guard AudioDeviceStart(aggregateID, ioProc) == noErr,
+        guard VirtualOutputHAL.isolateProcessTapInput(aggregateID, ioProc: ioProc, physicalUID: clockDeviceUID),
+              AudioDeviceStart(aggregateID, ioProc) == noErr,
               let registration = AirPlayRouteManager.shared.addAudioStream(appID: appID, buffer: ringBuffer) else {
             stop()
             return nil

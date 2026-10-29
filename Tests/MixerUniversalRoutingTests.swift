@@ -38,11 +38,19 @@ enum MixerUniversalRoutingContract {
         func set(_ value: [String], forKey key: String) { arrays[key] = value }
     }
 
+    final class VirtualOutputService {
+        static let shared = VirtualOutputService()
+        var isActive = false
+        var selectedUIDs: [String] = []
+        func selectPhysicalOutput(_ uid: String) -> Bool { selectedUIDs.append(uid); return true }
+    }
     final class Mixer {
+        typealias VirtualOutputService = MixerUniversalRoutingContract.VirtualOutputService
         typealias MixerApp = MixerUniversalRoutingContract.MixerApp
         typealias L10n = MixerUniversalRoutingContract.L10n
         typealias AirPlayRouteManager = AirPlay
         typealias UserDefaults = Preferences
+        typealias PreciseVolumeRollerService = MixerUniversalRoutingContract.PreciseVolumeRollerService
         static var deviceLists: [AudioObjectID: [AudioObjectID]] = [:]
         static var reads: [(AudioObjectID, AudioObjectPropertySelector, AudioObjectPropertyScope)] = []
         static var writes: [(AudioObjectID, AudioObjectPropertySelector)] = []
@@ -82,6 +90,11 @@ enum MixerUniversalRoutingContract {
         func applyRouting(for app: MixerApp) { applied.append(app) }
         func chooseAirPlaySpeaker(for app: MixerApp) {}
         func clearPermissionIfNoActiveAdjustments() {}
+    }
+
+    final class PreciseVolumeRollerService {
+        static let shared = PreciseVolumeRollerService()
+        func syncWithPreferences() {}
     }
 
     static func row(_ id: String = "process:77", objects: [AudioObjectID] = [100],
@@ -213,6 +226,16 @@ enum MixerUniversalRoutingContract {
         suite.expect(Mixer.writes.count == 1 && Mixer.writes[0].0 == 20
                      && Mixer.writes[0].1 == kAudioHardwarePropertyDefaultOutputDevice,
                      "universal selection writes only the requested default output")
+
+        let nativeMixer = Mixer()
+        VirtualOutputService.shared.isActive = true
+        let oldWrites = Mixer.writes.count
+        suite.expect(nativeMixer.setDefaultOutputDeviceUID("airpods")
+                     && VirtualOutputService.shared.selectedUIDs.last == "airpods"
+                     && Mixer.writes.count == oldWrites,
+                     "native fallback switches the bridge target without replacing the virtual default behind its owner")
+        VirtualOutputService.shared.isActive = false
+        VirtualOutputService.shared.selectedUIDs = []
 
         mixer.volumes = [:]
         mixer.currentOutputDeviceUID = "airpods"

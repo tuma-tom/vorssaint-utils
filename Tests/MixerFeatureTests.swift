@@ -23,6 +23,10 @@ enum MixerFeatureTests {
                 && !unavailable.devices && !unavailable.processes,
                "output switcher alone watches devices without starting per-app mixer taps")
 
+        suite.expectClose(MixerSoftwareVolumeSupport.savedLevel(NSNumber(value: 0.27)), 0.27,
+            "device volume restores its own saved level")
+        suite.expectClose(MixerSoftwareVolumeSupport.savedLevel(NSNumber(value: Double.infinity)), 0.5,
+            "non-finite saved level falls back to a safe middle level")
         suite.expectClose(Defaults.sanitizedAppVolume(1.5), 1.5, "valid app volume is preserved")
         suite.expectClose(Defaults.sanitizedAppVolume(3), 2, "high app volume clamps to boost maximum")
         suite.expectClose(Defaults.sanitizedAppVolume(-1), 0, "negative app volume clamps to mute")

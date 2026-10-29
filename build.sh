@@ -43,7 +43,7 @@ for arg in "$@"; do
 done
 
 if (( DEV )); then
-    APP_NAME="Vorssaint (Developer)"
+    APP_NAME="${VORSSAINT_DEV_APP_NAME:-Vorssaint (Developer)}"
     EXECUTABLE="VorssaintDeveloper"
     APP_BUNDLE_ID="com.vorssaint.utils.dev"
     BUILD_VARIANT_FLAGS=(-D VORSSAINT_DEVELOPMENT)
@@ -410,6 +410,7 @@ if (( TEST )); then
         Sources/Vorssaint/Services/SystemShortcutTakeoverSupport.swift
         Sources/Vorssaint/Core/Localization.swift
         Sources/Vorssaint/Core/Localizations/Strings+*.swift
+        Sources/Vorssaint/Core/VirtualOutputStrings.swift
         Sources/Vorssaint/Core/FeatureStrings.swift
         Sources/Vorssaint/Core/KillProcessStrings.swift
         Sources/Vorssaint/Core/PortManagerStrings.swift
@@ -424,6 +425,7 @@ if (( TEST )); then
         Sources/Vorssaint/Services/GeneralPasteboardAccess.swift
         Sources/Vorssaint/Services/Clipboard/ClipboardHistoryWrite.swift
         Sources/Vorssaint/Services/Audio/AirPlayRouteManager.swift
+        Sources/Vorssaint/Services/Audio/VirtualOutputSupport.swift
         Sources/Vorssaint/Services/Audio/MixerRoutingSupport.swift
         Sources/Vorssaint/Services/Audio/MusicLaunchSupport.swift
         Sources/Vorssaint/Services/Bluetooth/BluetoothSleepSupport.swift
@@ -596,6 +598,9 @@ if (( TEST )); then
         ./Tests/UninstallSpacesTests.sh || test_status=1
         ./Tests/DeveloperInstallIsolationTests.sh || test_status=1
     fi
+    if (( ${#TEST_ARGS} == 0 )) || [[ " ${TEST_ARGS[*]} " == *" --suite=mixer "* ]]; then
+        ./Tools/test-software-volume.sh || test_status=1
+    fi
     discard_test_preferences || test_status=1
     exit $test_status
 fi
@@ -691,6 +696,11 @@ cp Resources/com.vorssaint.utils.fan-control.plist \
     "$STAGE/Contents/Library/LaunchDaemons/$FAN_HELPER_ID.plist"
 cp Resources/Info.plist "$STAGE/Contents/Info.plist"
 cp CHANGELOG.md "$STAGE/Contents/Resources/CHANGELOG.md"
+# Bundle the optional installer; opening the mixer never executes it.
+./Tools/build-software-volume-driver.sh
+./Tools/package-software-volume-driver.sh
+cp build/VorssaintAudio.pkg "$STAGE/Contents/Resources/"
+cp Tools/uninstall-software-volume-driver.sh "$STAGE/Contents/Resources/"
 for lproj in Resources/*.lproj(N); do
     cp -R "$lproj" "$STAGE/Contents/Resources/"
 done

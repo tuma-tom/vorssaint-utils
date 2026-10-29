@@ -112,7 +112,8 @@ struct MixerSection: View {
             .buttonStyle(.plain)
 
             if optionsExpanded {
-                MixerOptionsControls(includeSharedAudioFeatures: !settingsMode)
+                MixerOptionsControls(includeSharedAudioFeatures: !settingsMode,
+                                     showComponentManagement: settingsMode)
                     .padding(.leading, 19)
             }
         }
@@ -541,6 +542,7 @@ struct MixerSection: View {
 struct MixerOptionsControls: View {
     @ObservedObject private var l10n = L10n.shared
     @ObservedObject private var mixer = AppVolumeMixer.shared
+    @ObservedObject private var virtualOutput = VirtualOutputService.shared
     @ObservedObject private var preciseVolumeRoller = PreciseVolumeRollerService.shared
     @ObservedObject private var permissions = Permissions.shared
     @AppStorage(DefaultsKey.mixerHideInactiveApps)
@@ -551,8 +553,14 @@ struct MixerOptionsControls: View {
     private var headphonesDisconnectVolumePercent = Defaults.defaultMixerHeadphonesDisconnectVolumePercent
     @AppStorage(DefaultsKey.preciseVolumeRollerEnabled)
     private var preciseVolumeRollerEnabled = false
+    @AppStorage(DefaultsKey.mixerSoftwareVolumeEnabled)
+    private var softwareVolumeEnabled = false
     @State private var showListChooser = false
+    @State private var showSoftwareVolumeInstaller = false
+    @State private var showSoftwareVolumeRemoval = false
+    @State private var showAudioPrivacy = false
     var includeSharedAudioFeatures = true
+    var showComponentManagement = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -560,6 +568,7 @@ struct MixerOptionsControls: View {
                 inactiveAppsVisibilityToggle
             }
             headphoneDisconnectProtectionToggle
+            softwareVolumeToggle
             preciseVolumeRollerToggle
             if includeSharedAudioFeatures, AppFeature.soundOutputSwitcher.isAvailable {
                 SoundOutputSwitcherControls()
@@ -641,7 +650,7 @@ struct MixerOptionsControls: View {
 
             if preciseVolumeRollerEnabled, !permissions.accessibility {
                 Button {
-                    Permissions.shared.openAccessibilitySettings()
+                    permissions.requestAccessibility()
                 } label: {
                     Label(l10n.s.permissionOpenSettings, systemImage: "hand.raised")
                 }
@@ -652,6 +661,77 @@ struct MixerOptionsControls: View {
                              systemImage: "exclamationmark.triangle")
             }
         }
+    }
+
+    private var softwareVolumeToggle: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            let nativeStrings = VirtualOutputStrings.localized(l10n.language)
+            Toggle(nativeStrings.title, isOn: softwareVolumeBinding)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11.5, weight: .medium))
+                .disabled(!AppVolumeMixer.isSupported || virtualOutput.isRemoving)
+                .onChange(of: softwareVolumeEnabled) { _, _ in
+                    mixer.syncSoftwareOutputWithPreferences()
+                }
+            Text(nativeStrings.caption)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if showComponentManagement {
+                Button(nativeStrings.privacyTitle) { showAudioPrivacy = true }
+                    .buttonStyle(.link)
+                    .font(.system(size: 10.5))
+                    .alert(nativeStrings.privacyTitle, isPresented: $showAudioPrivacy) {
+                        Button("OK", role: .cancel) {}
+                    } message: {
+                        Text(nativeStrings.privacyBody)
+                    }
+            }
+            if softwareVolumeEnabled, !virtualOutput.componentReady {
+                Button(nativeStrings.install) { showSoftwareVolumeInstaller = true }
+                    .buttonStyle(.link)
+                    .font(.system(size: 10.5, weight: .medium))
+            }
+            if showComponentManagement, virtualOutput.componentPresent {
+                Button(nativeStrings.remove) { showSoftwareVolumeRemoval = true }
+                    .buttonStyle(.link)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .disabled(virtualOutput.isRemoving)
+                    .alert(nativeStrings.removeTitle, isPresented: $showSoftwareVolumeRemoval) {
+                        Button(nativeStrings.remove, role: .destructive) { virtualOutput.removeComponent() }
+                        Button(l10n.s.uninstallerCancel, role: .cancel) {}
+                    } message: {
+                        Text(nativeStrings.removeBody)
+                    }
+            }
+            if let message = virtualOutput.error {
+                inputMessage(message, systemImage: "exclamationmark.triangle")
+            }
+            if virtualOutput.isActive, let uid = virtualOutput.physicalOutputUID {
+                let name = mixer.outputDevices.first { $0.uid == uid }?.name ?? uid
+                inputMessage("Vorssaint Audio → \(name)", systemImage: "speaker.wave.2")
+            }
+        }
+        .alert(VirtualOutputStrings.localized(l10n.language).installTitle,
+               isPresented: $showSoftwareVolumeInstaller) {
+            Button(VirtualOutputStrings.localized(l10n.language).install) {
+                virtualOutput.installForFallback()
+            }
+            Button(l10n.s.uninstallerCancel, role: .cancel) {}
+        } message: {
+            Text(VirtualOutputStrings.localized(l10n.language).installBody)
+        }
+    }
+
+    private var softwareVolumeBinding: Binding<Bool> {
+        Binding(get: { softwareVolumeEnabled }, set: { requested in
+            switch VirtualOutputSupport.enableAction(requested: requested,
+                                                      componentReady: virtualOutput.isInstalled) {
+            case .enable: softwareVolumeEnabled = true
+            case .disable: softwareVolumeEnabled = false
+            case .install: showSoftwareVolumeInstaller = true
+            }
+        })
     }
 
     /// One entry per app the list knows about: visible rows checked, hidden

@@ -165,6 +165,9 @@ enum DefaultsKey {
     static let mixerHeadphonesDisconnectVolumePercent = "mixerHeadphonesDisconnectVolumePercent"
     static let mixerHeadphonesDisconnectSilenceAllowed = "mixerHeadphonesDisconnectSilenceAllowed" // one-time: volumes below 10% were rewritten before silence became a choice
     static let preciseVolumeRollerEnabled = "preciseVolumeRollerEnabled"
+    static let mixerSoftwareVolumeEnabled = "mixerSoftwareVolumeEnabled"
+    static let mixerSoftwareVolumes = "mixerSoftwareVolumes"
+    static let softwareVolumePhysicalOutputUID = "softwareVolumePhysicalOutputUID"
     static let soundOutputSwitcherEnabled = "soundOutputSwitcherEnabled"
     static let soundOutputSwitcherShortcut = "soundOutputSwitcherShortcut"
     static let soundOutputSwitcherDeviceUIDs = "soundOutputSwitcherDeviceUIDs"
@@ -1328,6 +1331,7 @@ enum Defaults {
         DefaultsKey.mixerHeadphonesDisconnectVolumePercent: defaultMixerHeadphonesDisconnectVolumePercent,
         DefaultsKey.mixerHeadphonesDisconnectSilenceAllowed: false,
         DefaultsKey.preciseVolumeRollerEnabled: false,
+        DefaultsKey.mixerSoftwareVolumeEnabled: false,
         DefaultsKey.soundOutputSwitcherEnabled: false,
         DefaultsKey.soundOutputSwitcherShortcut: GlobalShortcut.soundOutputSwitcherDefault.storageValue,
         // The feature itself ships uninstalled. On first install both halves
