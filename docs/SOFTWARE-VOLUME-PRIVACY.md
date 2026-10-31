@@ -6,17 +6,21 @@ For outputs with writable native volume (for example built-in speakers or AirPod
 
 For a fixed-volume output such as a DisplayPort monitor:
 
-`Application output → optional per-app output tap/gain → Vorssaint Audio output mix → virtual loopback input/master gain → physical output`
+`Application output → optional per-app tap/gain → Vorssaint Audio output mix → bounded authorized PCM packets → output-only physical callback/master gain → physical output`
 
-The public Vorssaint Audio device is output-only: its input stream list is empty. A separate hidden input-only mirror supplies the playback return to the bridge. The hidden input is a loopback of samples written to the public output. It has no physical microphone source. It is not described as a microphone terminal and is not offered in Vorssaint's microphone selector, cannot become the default input, and is excluded from global microphone-mute sweeps. Its loopback input nevertheless exists in Core Audio; hiding it in this app is not access control against another application with audio-input access.
+Driver 1.2/build 4 has no input streams and publishes no hidden loopback input. The app obtains raw stereo output PCM through a custom HAL CFData property on a background queue. No property call, signature check, allocation or lock runs on the rendering thread. Rendering uses a bounded local ring with adaptive clock correction, clears unused channels and applies the current native master gain/mute exactly once.
+
+## Transport authorization
+
+Exclusive PID ownership is not sufficient authorization for PCM access. The driver constructs a code requirement from its own signing certificate. Ownership claims and session-key requests require the signed main/developer app identity and matching certificate. A fresh random 256-bit capability is returned only to that owner; every PCM request must carry it and match the owning PID. It is kept only in process memory, rotates with the session and is cleared on release/expiry. Signature checks stay off the 5ms packet path. PID 0, unknown/ad-hoc signers, wrong capabilities and other callers fail closed. This deliberately does not grant arbitrary local programs a new way to capture playback. Per-app taps retain macOS System Audio Recording permission. Explicit volume choices, including reset to 100%, are remembered so a playing application can have its per-app path prepared after restart. Apps without a saved volume or route are left untouched; stopped unity IO can release the path. This processes playback in memory and does not opt physical microphone streams into the callback.
+
+Packets carry a version, session generation, explicit cursor/acknowledgment, bounded frame count and echoed request nonce. Repeated reads do not destructively drain audio. The producer drops new data when full and never overwrites unacknowledged samples. Old-generation frames are silenced after session replacement. No world-readable shared-memory object, network socket or new helper daemon is created.
 
 ## Physical microphone isolation
 
-Before starting audio IO, both the bridge and per-app engines set `kAudioDevicePropertyIOProcStreamUsage` and read the mask back. The bridge enables only the virtual driver's leading input streams. A per-app engine enables only the process-output tap appended after the physical device's input streams. The observed stream count must equal the known source count plus the physical input count. An incomplete or unexpected layout, failed setter, or mismatching readback prevents startup.
+Before starting the physical output IOProc, the bridge sets every physical input stream's `kAudioDevicePropertyIOProcStreamUsage` flag to zero and reads it back. A genuinely output-only device needs no input mask. The output callback ignores its input argument. Per-app engines separately enable only their process-output tap and disable all physical input streams. An incomplete layout or mismatching readback prevents startup; topology changes rebuild the route.
 
-Apple's HAL contract states that disabled streams have a NULL data pointer in that IOProc's callback. The bridge additionally validates its virtual-first subdevice order, copies only its declared virtual stereo source, and clears every other output. The per-app engines therefore do not need physical microphone samples, including when the selected output device also contains a microphone.
-
-This supports a specific assurance: these playback callbacks are configured not to receive/read physical microphone samples. It does **not** prove that a microphone is powered off, prohibit another app from using it, replace the OS privacy controls, or narrow macOS's application-wide microphone permission to a single device. Isolation is verified before startup; device/format changes cause the bridge to stop or rebuild. Topology-change and physical-microphone tests on each device family remain relevant.
+These playback callbacks are configured not to receive/read physical microphone samples. This does not prohibit another app or an explicitly enabled recorder from using a microphone. The supported target behavior is that fallback itself does not light the orange microphone indicator; it must be verified with the installed new app/driver on real macOS, not inferred from unit tests.
 
 ## Recording and network scope
 
@@ -26,12 +30,14 @@ This statement applies to this processing path. The existing screen recorder can
 
 ## Evidence and limits
 
-Automated checks exercise driver volume/mute, loopback DSP, owner expiry, input-mask construction, unexpected stream counts, NULL/empty callback buffers, stereo/microphone isolation and output restoration. The app refuses to start these IO paths if the live HAL mask cannot be verified.
+Automated checks exercise driver volume/mute, qualified PCM packets, signed caller authorization, owner expiry, input-mask construction, unexpected stream counts, NULL/empty callback buffers, stereo/microphone isolation and output restoration. The app refuses to start these IO paths if the live HAL mask cannot be verified.
 
 The code and tests are reviewable; they are not an independent security certification or a promise about all future changes to the original application. Runtime checks, tested devices and remaining gaps are recorded in the accompanying PR rather than inferred from unit tests.
 
-## Browser permission prompts
+## Local development signing and audit limits
 
-A macOS microphone permission prompt was reported during Firefox playback with the earlier duplex prototype. A live follow-up found output running and input stopped; after explicitly revoking Firefox microphone permission and restarting it, playback still worked (confirmed audibly by the tester). This does not establish what triggered the earlier request.
+The installed local driver 1.2.0/build 4 passes strict signature verification. Its HAL directory and ancestors are owned by root, with no writable group/other permissions or symlinks found. The driver runs in a Core Audio host under `_coreaudiod`, rather than in the application's user process. Current driver/PCM/caller-trust source files match the installed Corresponding Source. A fresh untrusted-process probe was denied both the session-key property and a zero-frame PCM request; it recorded no sound or key material.
 
-The public driver now splits output and loopback input surfaces, as supported by upstream BlackHole. Output clients do not need to open the hidden input. Only a fresh-permission reproduction can establish whether this prevents the original prompt; an absence of another prompt after macOS has remembered a response is not that test. Do not instruct users to grant browsers microphone access merely to play media.
+This Mac uses the repository's self-signed development certificate, not a notarized Developer ID release. The local signing setup makes that key available to this developer account; software that can use the key could sign an allowed app identity and satisfy the driver's certificate policy. The current local installer package is unsigned, although its contained driver and enclosing app have valid local signatures. These facts prevent a strong guarantee against malware with access to this user's signing key or a claim of public-release authenticity. Public distribution needs protected signing keys and an authenticated, appropriately signed release package.
+
+The unit driver harness substitutes a test identity policy; it does not by itself prove production certificate enforcement. The installed signed-owner path and denial to a separate untrusted process were also exercised on this Mac. Same-shaped dynamic microphone topology changes and every future macOS version are not certified by these checks. The physical output callback ignores input samples regardless; the tested hardware microphones remained inactive during playback.

@@ -34,7 +34,13 @@ enum MixerFeatureTests {
         suite.expectClose(Double(MixerRoutingSupport.gain(forVolume: 0)), 0, "a muted app stays silent")
         suite.expectClose(Double(MixerRoutingSupport.gain(forVolume: 0.5)), 0.25,
                     "half the slider is a clearly quieter app, not a 6 dB trim")
-        suite.expectClose(Double(MixerRoutingSupport.gain(forVolume: 1)), 1, "100% plays the app untouched")
+        suite.expectClose(Double(MixerRoutingSupport.gain(forVolume: 1)), 1, "100% uses unity gain")
+        for value in [0.995, 0.999, 1.001, 1.0049] {
+            suite.expect(MixerRoutingSupport.displayPercent(forVolume: value) == 100
+                         && MixerRoutingSupport.isUnity(value)
+                         && MixerRoutingSupport.gain(forVolume: value) == 1,
+                         "a slider displaying100% is exact unity and cannot accidentally engage boost protection (\(value))")
+        }
         suite.expectClose(Double(MixerRoutingSupport.gain(forVolume: 2)), 2, "the boost range keeps its ceiling")
         suite.expectClose(Double(MixerRoutingSupport.gain(forVolume: -1)), 0, "a level below zero never plays")
         suite.expect(MixerRoutingSupport.displayPercent(forVolume: 0.456) == 46, "a volume shows as a rounded percent")
@@ -385,6 +391,20 @@ enum MixerFeatureTests {
                                                    defaultOutputDeviceUID: "BuiltInSpeakerDevice"),
                "a persistent mixer row waits for an audio connection before building a tap")
 
+        for volume in [1.0, 0.999, 1.001] {
+            suite.expect(MixerRoutingSupport.requiresEngine(volume: volume,
+                selectedOutputDeviceUID: nil, targetOutputDeviceUID: "display", defaultOutputDeviceUID: "display",
+                volumeIsBeingEdited: true, hasRunningEngine: true),
+                "dragging through unity keeps the running tap instead of repeatedly muting and rebuilding")
+            suite.expect(!MixerRoutingSupport.requiresEngine(volume: volume,
+                selectedOutputDeviceUID: nil, targetOutputDeviceUID: "display", defaultOutputDeviceUID: "display",
+                volumeIsBeingEdited: false, hasRunningEngine: true),
+                "ending a drag at unity releases unnecessary processing")
+            suite.expect(!MixerRoutingSupport.requiresEngine(volume: volume,
+                selectedOutputDeviceUID: nil, targetOutputDeviceUID: "display", defaultOutputDeviceUID: "display",
+                volumeIsBeingEdited: true, hasRunningEngine: false),
+                "touching an untouched unity slider never creates a capture tap")
+        }
         // The stereo mixdown tap divides by the channel pairs of the output the
         // app plays to, so the engine has to give that level back.
         suite.expectClose(MixerRoutingSupport.tapLevelCompensation(streamChannels: [2]), 1,
@@ -583,10 +603,10 @@ enum MixerFeatureTests {
                                                    savedRouteUID: nil,
                                                    defaultOutputDeviceUID: "BuiltInSpeakerDevice"),
                "an app with no saved volume and no saved route is never tapped")
-        suite.expect(!MixerRoutingSupport.rowMayBeTapped(savedVolume: 1,
+        suite.expect(MixerRoutingSupport.rowMayBeTapped(savedVolume: 1,
                                                    savedRouteUID: nil,
                                                    defaultOutputDeviceUID: "BuiltInSpeakerDevice"),
-               "a row saved at 100 percent is never tapped")
+               "a saved100 percent choice authorizes restoring previously requested volume control")
         suite.expect(MixerRoutingSupport.rowMayBeTapped(savedVolume: nil,
                                                    savedRouteUID: "BuiltInSpeakerDevice",
                                                    defaultOutputDeviceUID: "BuiltInSpeakerDevice"),
@@ -806,7 +826,8 @@ enum MixerFeatureTests {
         } ?? ""
         suite.expect(teardownQueueSetup.contains("maxConcurrentOperationCount"),
                "engine teardown runs on a queue with a concurrency bound, not one thread and not one per engine")
-        suite.expect(mixerCode.contains("let gain = box.value * ramp.next(toward: compensation.value, hostTime: now.pointee.mHostTime)")
+        suite.expect(mixerCode.contains("let requestedGain = box.value")
+                     && mixerCode.contains("let gain = requestedGain * ramp.next(toward: compensation.value, hostTime: now.pointee.mHostTime)")
                      && mixerCode.contains("let currentGain = box.value * ramp.next(toward: compensation.value, hostTime: now.pointee.mHostTime)")
                      && mixerCode.components(separatedBy: "let ramp = TapLevelRamp()").count == 3,
                      "both engines give back the level the tap's mixdown took, eased")
@@ -823,7 +844,7 @@ enum MixerFeatureTests {
                      && levelWatch.contains("mScope: kAudioObjectPropertyScopeOutput")
                      && mixerCode.components(separatedBy: "LevelCompensationWatch.started(objects: objects)").count == 3,
                      "both engines follow the app to another output, on the scope the HAL announces it")
-        let engineInits = ["init?(objects: [AudioObjectID], gain: Float, outputDeviceUID: String)",
+        let engineInits = ["init?(objects: [AudioObjectID], gain: Float, outputDeviceUID: String",
                            "init?(appID: String, objects: [AudioObjectID], gain: Float, clockDeviceUID: String)"]
             .map { signature in
                 mixerCode.range(of: signature).flatMap { start in

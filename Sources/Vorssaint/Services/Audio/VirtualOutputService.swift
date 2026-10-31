@@ -12,6 +12,7 @@ final class VirtualOutputService: ObservableObject {
     @Published private(set) var isStarting = false
     @Published private(set) var componentReady = false
     @Published private(set) var componentPresent = false
+    @Published private(set) var componentNeedsUpdate = false
     @Published private(set) var isRemoving = false
     @Published private(set) var physicalOutputUID: String?
     @Published private(set) var requestedOutputUID: String?
@@ -30,29 +31,38 @@ final class VirtualOutputService: ObservableObject {
     private var lastCycles: Int64 = 0
     private var lastProgress = ProcessInfo.processInfo.systemUptime
     private var suspended = false
-    private var enableAfterInstall = false
+    private var installerOpened = false
+    private var updateOffered = false
+    private var updateAlert: NonModalAlert?
 
     func sync(enabled: Bool) {
         acceptsOutputSelections = enabled
-        if !enabled { requestedOutputUID = nil; _ = outputRequests.next() }
+        if !enabled {
+            updateAlert?.dismiss(with: .alertSecondButtonReturn); updateAlert = nil
+            installerOpened = false
+            requestedOutputUID = nil; _ = outputRequests.next()
+        }
         queue.async { [self] in
             let device = VirtualOutputHAL.componentDevice()
             let present = VirtualOutputHAL.installedComponentExists()
+            let needsUpdate = VirtualOutputSupport.needsComponentUpdate(installed: present,
+                build: VirtualOutputHAL.installedComponentBuild, required: VirtualOutputHAL.requiredComponentBuild)
             DispatchQueue.main.async {
                 if self.componentReady != (device != nil) { self.componentReady = device != nil }
                 if self.componentPresent != present { self.componentPresent = present }
-                if device != nil, self.enableAfterInstall {
-                    self.enableAfterInstall = false
-                    UserDefaults.standard.set(true, forKey: DefaultsKey.mixerSoftwareVolumeEnabled)
-                    AppVolumeMixer.shared.syncSoftwareOutputWithPreferences()
-                }
+                if self.componentNeedsUpdate != needsUpdate { self.componentNeedsUpdate = needsUpdate }
+                self.offerComponentUpdateIfNeeded(enabled: enabled && self.acceptsOutputSelections, needsUpdate: needsUpdate)
+                if device != nil { self.installerOpened = false }
             }
             guard enabled else {
                 suspended = false
                 if bridge != nil || virtual != nil { deactivate() }
                 return
             }
-            guard let device else { return }
+            guard let device else {
+                if bridge != nil || virtual != nil { deactivate() }
+                return
+            }
             if let bridge {
                 let current = VirtualOutputHAL.defaultUID()
                 if current != virtualUID {
@@ -142,15 +152,45 @@ final class VirtualOutputService: ObservableObject {
     }
     func stop() {
         acceptsOutputSelections = false
+        updateAlert?.dismiss(with: .alertSecondButtonReturn); updateAlert = nil
+        installerOpened = false
         requestedOutputUID = nil; _ = outputRequests.next()
         queue.sync { deactivate() }
     }
+    /// Main queue; one offer per app launch, never for an unused optional package.
+    private func offerComponentUpdateIfNeeded(enabled: Bool, needsUpdate: Bool) {
+        guard VirtualOutputSupport.shouldOfferComponentUpdate(enabled: enabled, needsUpdate: needsUpdate,
+            offered: updateOffered, installing: installerOpened, removing: isRemoving) else { return }
+        updateOffered = true
+        let strings = VirtualOutputStrings.localized(L10n.shared.language)
+        let alert = NSAlert()
+        alert.messageText = strings.updateTitle
+        alert.informativeText = strings.updateBody
+        alert.addButton(withTitle: strings.update)
+        alert.addButton(withTitle: L10n.shared.s.uninstallerCancel)
+        updateAlert = NonModalAlert.present(alert) { [weak self] response in
+            guard let self else { return }
+            self.updateAlert = nil
+            guard self.acceptsOutputSelections,
+                  UserDefaults.standard.bool(forKey: DefaultsKey.mixerSoftwareVolumeEnabled) else { return }
+            if response == .alertFirstButtonReturn { self.installForFallback() }
+        }
+    }
     func installForFallback() {
         guard !isRemoving else { return }
-        enableAfterInstall = true
-        if !openInstaller() { enableAfterInstall = false }
+        updateOffered = true
+        guard openInstaller() else { installerOpened = false; return }
+        installerOpened = !isInstalled
+        // Store the user's desired state now, so Off remains authoritative.
+        // A later HAL notification never changes this preference.
+        UserDefaults.standard.set(true, forKey: DefaultsKey.mixerSoftwareVolumeEnabled)
+        AppVolumeMixer.shared.syncSoftwareOutputWithPreferences()
     }
     @discardableResult func openInstaller() -> Bool {
+        // The offer may have stayed open while another installer completed.
+        guard VirtualOutputSupport.shouldOpenBundledInstaller(
+            installedBuild: VirtualOutputHAL.installedComponentBuild,
+            bundledBuild: VirtualOutputHAL.requiredComponentBuild, ready: isInstalled) else { return true }
         guard let installer = Bundle.main.url(forResource: "VorssaintAudio", withExtension: "pkg") else {
             error = VirtualOutputStrings.localized(L10n.shared.language).message(.installerMissing)
             return false
@@ -162,7 +202,7 @@ final class VirtualOutputService: ObservableObject {
     func removeComponent(completion: ((Bool) -> Void)? = nil) {
         guard !isRemoving else { completion?(false); return }
         requestedOutputUID = nil; _ = outputRequests.next()
-        enableAfterInstall = false
+        installerOpened = false
         guard let script = Bundle.main.url(forResource: "uninstall-software-volume-driver", withExtension: "sh") else {
             error = VirtualOutputStrings.localized(L10n.shared.language).message(.removalFailed)
             completion?(false)
@@ -209,21 +249,32 @@ final class VirtualOutputService: ObservableObject {
         // Keep the virtual default during a format change. It stays silent
         // until the replacement bridge is ready, avoiding a raw-volume spike.
         bridge?.stop(); bridge = nil
-        guard VirtualOutputHAL.write(virtual, VirtualOutputSupport.ownerSelector, value: kCFBooleanTrue!) == noErr else {
+        let ownerStatus = VirtualOutputHAL.write(virtual, VirtualOutputSupport.ownerSelector, value: kCFBooleanTrue!)
+        guard ownerStatus == noErr else {
             deactivate(); suspended = true
-            publish(error: .inUse)
+            publish(error: ownerStatus == kAudioDevicePermissionsError ? .privacyUnverified : .inUse)
             return
         }
         ownsVirtualOutput = true
         do {
-            let next = try VirtualOutputBridge(virtual: virtual, physicalUID: physicalUID)
-            bridge = next
             let levels = UserDefaults.standard.dictionary(forKey: DefaultsKey.mixerSoftwareVolumes)
             let level = MixerSoftwareVolumeSupport.savedLevel(levels?[physicalUID])
+            // The virtual default may already carry playback from another
+            // physical destination. Its pump must see the new controls before
+            // the bridge constructor starts physical IO, including mute.
             guard VirtualOutputHAL.setOutputLevel(virtual, level: level) else {
                 throw VirtualOutputBridge.Failure("Could not initialize native master volume")
             }
-            _ = VirtualOutputHAL.write(virtual, kAudioDevicePropertyMute, value: UInt32(level == 0 ? 1 : 0), scope: kAudioObjectPropertyScopeOutput)
+            let muted: UInt32 = level == 0 ? 1 : 0
+            var actualMuted: UInt32 = 0
+            guard VirtualOutputHAL.write(virtual, kAudioDevicePropertyMute, value: muted, scope: kAudioObjectPropertyScopeOutput) == noErr,
+                  VirtualOutputHAL.read(virtual, kAudioDevicePropertyMute, into: &actualMuted, scope: kAudioObjectPropertyScopeOutput),
+                  actualMuted == muted,
+                  let actualLevel = VirtualOutputHAL.outputLevel(virtual), abs(actualLevel - level) < 0.0001 else {
+                throw VirtualOutputBridge.Failure("Could not verify native master volume and mute")
+            }
+            let next = try VirtualOutputBridge(virtual: virtual, physicalUID: physicalUID)
+            bridge = next
             guard VirtualOutputHAL.select(virtualUID) else {
                 throw VirtualOutputBridge.Failure("Could not select the Vorssaint Audio system output")
             }

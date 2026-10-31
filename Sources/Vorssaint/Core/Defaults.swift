@@ -150,7 +150,7 @@ enum DefaultsKey {
     static let whatsNewPendingVersion = "whatsNewPendingVersion" // the update the post-update window starts after
     static let whatsNewSeenVersion = "whatsNewSeenVersion"   // last version that finished the window
     static let whatsNewKnownFeatures = "whatsNewKnownFeatures" // comma-joined AppFeature raw values
-    static let appVolumes = "appVolumes"                  // [bundle id: 0...2]
+    static let appVolumes = "appVolumes"                  // [bundle id: 0...2]; explicit 1 remembers mixer control
     static let appVolumesArePositions = "appVolumesArePositions" // appVolumes hold slider positions, not gains; travels with them so an older backup converts on restore
     static let appOutputDevices = "appOutputDevices"      // [bundle id: audio device UID]
     static let mixerCallAppVolumeEnabled = "mixerCallAppVolumeEnabled" // bundle ids explicitly allowed to process call audio despite screen-sharing echo

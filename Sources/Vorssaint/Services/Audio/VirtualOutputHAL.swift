@@ -80,29 +80,38 @@ enum VirtualOutputHAL {
         }
         return false
     }
-    static func componentDevice() -> AudioObjectID? {
-        let candidates = [("VorssaintAudio", VirtualOutputSupport.deviceUID, 3),
-                          ("VorssaintAudioFork", VirtualOutputSupport.legacyDeviceUID, 2)]
-        for (bundle, uid, minimumVersion) in candidates {
-            let plist = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/\(bundle).driver/Contents/Info.plist")
+    static var requiredComponentBuild: Int {
+        VirtualOutputSupport.requiredComponentBuild(bundledBuild: Bundle.main.object(forInfoDictionaryKey: "VorssaintAudioDriverBuild") as? Int)
+    }
+    private static func installedComponents() -> [(uid: String, info: [String: Any])] {
+        [("VorssaintAudio", "com.vorssaint.utils.software-volume.driver", VirtualOutputSupport.deviceUID),
+         ("VorssaintAudioFork", "com.vorssaint.audiofork.driver", VirtualOutputSupport.legacyDeviceUID)].compactMap { name, identifier, uid in
+            let plist = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/\(name).driver/Contents/Info.plist")
             guard let data = try? Data(contentsOf: plist),
                   let info = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
-                  let version = info["CFBundleVersion"] as? String, (Int(version) ?? 0) >= minimumVersion,
-                  let device = device(uid) else { continue }
-            var property = address(VirtualOutputSupport.ownerSelector)
-            if AudioObjectHasProperty(device, &property) { return device }
+                  info["CFBundleIdentifier"] as? String == identifier else { return nil }
+            return (uid, info)
+        }
+    }
+    static var installedComponentBuild: Int? {
+        installedComponents().compactMap { ($0.info["CFBundleVersion"] as? String).flatMap(Int.init) }.max()
+    }
+    static func componentDevice() -> AudioObjectID? {
+        for component in installedComponents() {
+            guard let version = component.info["CFBundleVersion"] as? String,
+                  (Int(version) ?? 0) >= requiredComponentBuild,
+                  let device = device(component.uid) else { continue }
+            // A newly copied plist must not make an old, still-loaded duplex
+            // driver appear ready while Core Audio is restarting.
+            let selectors: [AudioObjectPropertySelector] = [VirtualOutputSupport.ownerSelector, 0x766b6579, 0x7670636d]
+            if selectors.allSatisfy({ selector in
+                var property = address(selector)
+                return AudioObjectHasProperty(device, &property)
+            }) { return device }
         }
         return nil
     }
-    static func installedComponentExists() -> Bool {
-        [("VorssaintAudio", "com.vorssaint.utils.software-volume.driver"),
-         ("VorssaintAudioFork", "com.vorssaint.audiofork.driver")].contains { name, identifier in
-            let plist = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/\(name).driver/Contents/Info.plist")
-            guard let data = try? Data(contentsOf: plist),
-                  let info = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any] else { return false }
-            return info["CFBundleIdentifier"] as? String == identifier
-        }
-    }
+    static func installedComponentExists() -> Bool { !installedComponents().isEmpty }
     static func restorableOutputs(systemSounds: Bool) -> [String] {
         objects(system, kAudioHardwarePropertyDevices).compactMap { device in
             var alive: UInt32 = 0, hidden: UInt32 = 0, eligible: UInt32 = 0
@@ -166,6 +175,12 @@ enum VirtualOutputHAL {
         let count = Int(size) / MemoryLayout<AudioObjectID>.size
         guard objects(device, kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeInput).count == count else { return nil }
         return count
+    }
+    static func isolatePhysicalOutputInput(_ device: AudioObjectID, ioProc: AudioDeviceIOProcID?) -> Bool {
+        guard let count = inputStreamCount(device) else { return false }
+        guard let mask = VirtualOutputSupport.inputMask(streamCount: count, source: .physicalOutput(streams: count)) else { return false }
+        if mask.isEmpty { return true }
+        return setStreamUsage(device, ioProc: ioProc, scope: kAudioObjectPropertyScopeInput, enabled: mask)
     }
     static func isolateProcessTapInput(_ device: AudioObjectID, ioProc: AudioDeviceIOProcID?, physicalUID: String) -> Bool {
         guard let physical = self.device(physicalUID), let count = inputStreamCount(physical) else { return false }

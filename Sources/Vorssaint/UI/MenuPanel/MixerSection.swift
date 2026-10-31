@@ -6,7 +6,7 @@ import SwiftUI
 
 /// Per-app volume sliders, the mixer macOS never shipped. Shows every app
 /// holding an audio connection (a green dot marks the ones playing right now).
-/// 100% is untouched passthrough; below it attenuates and above it (up to 200%)
+/// 100% is unity gain; below it attenuates and above it (up to 200%)
 /// boosts, with the slider and percentage turning amber in the boost range.
 struct MixerSection: View {
     @Environment(\.notchPresentation) private var inNotch
@@ -664,8 +664,8 @@ struct MixerOptionsControls: View {
     }
 
     private var softwareVolumeToggle: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            let nativeStrings = VirtualOutputStrings.localized(l10n.language)
+        let nativeStrings = VirtualOutputStrings.localized(l10n.language)
+        return VStack(alignment: .leading, spacing: 3) {
             Toggle(nativeStrings.title, isOn: softwareVolumeBinding)
                 .toggleStyle(.checkbox)
                 .font(.system(size: 11.5, weight: .medium))
@@ -703,7 +703,7 @@ struct MixerOptionsControls: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if softwareVolumeEnabled, !virtualOutput.componentReady {
-                Button(nativeStrings.install) { showSoftwareVolumeInstaller = true }
+                Button(virtualOutput.componentNeedsUpdate ? nativeStrings.update : nativeStrings.install) { showSoftwareVolumeInstaller = true }
                     .buttonStyle(.link)
                     .font(.system(size: 10.5, weight: .medium))
             }
@@ -715,14 +715,14 @@ struct MixerOptionsControls: View {
                 inputMessage("Vorssaint Audio → \(name)", systemImage: "speaker.wave.2")
             }
         }
-        .alert(VirtualOutputStrings.localized(l10n.language).installTitle,
+        .alert(virtualOutput.componentNeedsUpdate ? nativeStrings.updateTitle : nativeStrings.installTitle,
                isPresented: $showSoftwareVolumeInstaller) {
-            Button(VirtualOutputStrings.localized(l10n.language).install) {
+            Button(virtualOutput.componentNeedsUpdate ? nativeStrings.update : nativeStrings.install) {
                 virtualOutput.installForFallback()
             }
             Button(l10n.s.uninstallerCancel, role: .cancel) {}
         } message: {
-            Text(VirtualOutputStrings.localized(l10n.language).installBody)
+            Text(virtualOutput.componentNeedsUpdate ? nativeStrings.updateBody : nativeStrings.installBody)
         }
     }
 
@@ -1060,7 +1060,8 @@ private struct MixerRow: View {
                                           accentRevision: accentRevision,
                                           glassEnabled: glassEnabled,
                                           maximum: AppVolumeMixer.maxVolume,
-                                          accessibilityLabel: app.name)
+                                          accessibilityLabel: app.name,
+                                          onEditingChanged: { mixer.volumeEditingChanged($0, for: app) })
 
                         EditableVolumePercent(currentPercent: MixerRoutingSupport.displayPercent(forVolume: app.volume),
                                               maximumPercent: Int(AppVolumeMixer.maxVolume * 100),
@@ -1454,6 +1455,7 @@ private struct MixerVolumeSlider: View {
     let glassEnabled: Bool
     let maximum: Double
     let accessibilityLabel: String
+    var onEditingChanged: ((Bool) -> Void)? = nil
 
     private var activeTint: Color { isBoosting ? boostTint : normalTint }
     private var percentage: Int { MixerRoutingSupport.displayPercent(forVolume: value) }
@@ -1466,7 +1468,8 @@ private struct MixerVolumeSlider: View {
                                        tint: activeTint,
                                        isBoosting: isBoosting,
                                        maximum: maximum,
-                                       accessibilityLabel: accessibilityLabel)
+                                       accessibilityLabel: accessibilityLabel,
+                                       onEditingChanged: onEditingChanged)
             } else {
                 nativeSlider
                     .accessibilityLabel(accessibilityLabel)
@@ -1479,10 +1482,11 @@ private struct MixerVolumeSlider: View {
 #endif
         }
         .overlay(SliderScrollArea(value: $value, range: 0...maximum))
+        .onDisappear { onEditingChanged?(false) }
     }
 
     private var nativeSlider: some View {
-        Slider(value: $value, in: 0...maximum)
+        Slider(value: $value, in: 0...maximum, onEditingChanged: { onEditingChanged?($0) })
             .controlSize(.small)
             // Pass an explicit accent (not nil) for the normal state: on the
             // macOS slider, tint(nil) does not reliably clear a previously
@@ -1500,6 +1504,8 @@ private struct LiquidGlassMixerSlider: View {
     let isBoosting: Bool
     let maximum: Double
     let accessibilityLabel: String
+    var onEditingChanged: ((Bool) -> Void)? = nil
+    @GestureState private var isDragging = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1535,12 +1541,24 @@ private struct LiquidGlassMixerSlider: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($isDragging) { _, active, _ in active = true }
                     .onChanged { gesture in
+                        // Begin before the value write; GestureState cleans up
+                        // cancellation even when onEnded is not delivered.
+                        onEditingChanged?(true)
                         updateValue(at: gesture.location.x, width: width)
+                    }
+                    .onEnded { gesture in
+                        updateValue(at: gesture.location.x, width: width)
+                        onEditingChanged?(false)
                     }
             )
         }
         .frame(height: knobHeight)
+        .onChange(of: isDragging) { _, active in
+            if !active { onEditingChanged?(false) }
+        }
+        .onDisappear { onEditingChanged?(false) }
         .accessibilityLabel(accessibilityLabel)
         .accessibilityValue("\(MixerRoutingSupport.displayPercent(forVolume: value))%")
         .accessibilityAdjustableAction { direction in

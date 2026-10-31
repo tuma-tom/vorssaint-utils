@@ -36,11 +36,13 @@ static OSStatus owner(AudioServerPlugInDriverRef driver, pid_t pid, UInt32 value
 int main(void) {
  AudioServerPlugInDriverRef driver=CreateDriver(NULL,kAudioServerPlugInTypeUUID);
  CHECK(driver != NULL); gPlugIn_Host=&host;
+ CHECK(owner(driver,getpid(),1,sizeof(CFPropertyListRef))==kAudioDevicePermissionsError); // no installed signer policy => denied
+ CHECK(SecRequirementCreateWithString(CFSTR("identifier \"com.vorssaint.utils.pcm-tests\""),kSecCSDefaultFlags,&afTrustedRequirement)==errSecSuccess);
  CFStringRef uid=CFSTR("VorssaintAudio_UID"); AudioObjectID translated=0; UInt32 translatedSize=0;
  AudioObjectPropertyAddress translation=prop(kAudioPlugInPropertyTranslateUIDToDevice);
  CHECK((*driver)->GetPropertyData(driver,kObjectID_PlugIn,getpid(),&translation,sizeof(uid),&uid,sizeof(translated),&translatedSize,&translated)==noErr && translated==kObjectID_Device);
  CHECK((*driver)->GetPropertyData(driver,kObjectID_PlugIn,getpid(),&translation,1,&uid,sizeof(translated),&translatedSize,&translated)==kAudioHardwareBadPropertySizeError);
- AudioServerPlugInCustomPropertyInfo info[2]; UInt32 infoSize=0;
+ AudioServerPlugInCustomPropertyInfo info[4]; UInt32 infoSize=0;
  AudioObjectPropertyAddress custom=prop(kAudioObjectPropertyCustomPropertyInfoList);
  CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getpid(),&custom,0,NULL,sizeof(info),&infoSize,info)==noErr
   && infoSize==sizeof(info) && info[0].mPropertyDataType==kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
@@ -61,18 +63,18 @@ int main(void) {
  streams.mScope=kAudioObjectPropertyScopeInput;
  UInt32 streamBytes=99;
  CHECK((*driver)->GetPropertyDataSize(driver,kObjectID_Device,getpid(),&streams,0,NULL,&streamBytes)==noErr && streamBytes==0);
- CHECK((*driver)->GetPropertyDataSize(driver,kObjectID_Device2,getpid(),&streams,0,NULL,&streamBytes)==noErr && streamBytes==sizeof(AudioObjectID));
+ CHECK((*driver)->GetPropertyDataSize(driver,kObjectID_Device2,getpid(),&streams,0,NULL,&streamBytes)==noErr && streamBytes==0); // No hidden microphone-like loopback input.
  streams.mScope=kAudioObjectPropertyScopeOutput;
  CHECK((*driver)->GetPropertyDataSize(driver,kObjectID_Device2,getpid(),&streams,0,NULL,&streamBytes)==noErr && streamBytes==0);
  CHECK(get32(driver,kObjectID_Device2,kAudioDevicePropertyIsHidden,&value)==noErr && value==1);
+ AudioObjectPropertyAddress deviceList=prop(kAudioPlugInPropertyDeviceList);
+ UInt32 deviceBytes=0;
+ CHECK((*driver)->GetPropertyDataSize(driver,kObjectID_PlugIn,getpid(),&deviceList,0,NULL,&deviceBytes)==noErr && deviceBytes==sizeof(AudioObjectID));
  CHECK(get32(driver,kObjectID_Device2,kAudioDevicePropertyDeviceIsAlive,&value)==noErr && value==1);
  CHECK((*driver)->GetPropertyData(driver,kObjectID_Device2,getpid(),&inputDefault,0,NULL,sizeof(value),&outSize,&value)==noErr && value==0);
- CHECK(get32(driver,kObjectID_Stream_Input,kAudioObjectPropertyOwner,&value)==noErr && value==kObjectID_Device2);
- CHECK(get32(driver,kObjectID_Volume_Input_Master,kAudioObjectPropertyOwner,&value)==noErr && value==kObjectID_Device2);
- CHECK(get32(driver,kObjectID_Stream_Input,kAudioStreamPropertyTerminalType,&value)==noErr && value==kAudioStreamTerminalTypeUnknown);
  Boolean willDo=true, inPlace=false;
  CHECK((*driver)->WillDoIOOperation(driver,kObjectID_Device,0,kAudioServerPlugInIOOperationReadInput,&willDo,&inPlace)==noErr && !willDo);
- CHECK(owner(driver,getppid(),1,sizeof(CFPropertyListRef))==kAudioHardwareIllegalOperationError);
+ CHECK(owner(driver,getppid(),1,sizeof(CFPropertyListRef))==kAudioDevicePermissionsError);
  CHECK(owner(driver,getppid(),0,sizeof(CFPropertyListRef))==kAudioHardwareIllegalOperationError);
  CHECK(owner(driver,getpid(),1,sizeof(CFPropertyListRef))==noErr);
  CHECK(owner(driver,getpid(),0,sizeof(CFPropertyListRef))==noErr);
@@ -84,20 +86,39 @@ int main(void) {
  CHECK((*driver)->GetPropertyData(driver,kObjectID_Volume_Output_Master,getpid(),&scalar,0,NULL,sizeof(actual),&controlSize,&actual)==noErr && fabsf(actual-requested)<1e-5f);
  requested=NAN;
  CHECK((*driver)->SetPropertyData(driver,kObjectID_Volume_Output_Master,getpid(),&scalar,0,NULL,sizeof(requested),&requested)==kAudioHardwareIllegalOperationError);
- // Exercise real loopback IO: two mixed app samples, one native master gain.
- Float32 ring[kRing_Buffer_Frame_Size * 2]; memset(ring,0,sizeof(ring)); gRingBuffer=ring;
- Float32 data[8]={0.4f,0.2f,0.4f,0.2f,0.4f,0.2f,0.4f,0.2f};
- AudioServerPlugInIOCycleInfo cycle={0}; cycle.mOutputTime.mSampleTime=100; cycle.mCurrentTime.mSampleTime=100; cycle.mInputTime.mSampleTime=100;
- gVolume_Master_Value=0.5f; gMute_Master_Value=false;
+ // Exercise mixed output transfer through qualified, repeatable HAL reads.
+ CHECK(owner(driver,getpid(),1,sizeof(CFPropertyListRef))==noErr);
+ VSRequest request={.magic=VS_MAGIC,.version=VS_VERSION,.nonce=1};
+ AudioObjectPropertyAddress keyAddress=prop('vkey');CFDataRef key=NULL;
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getpid(),&keyAddress,0,NULL,sizeof(key),&outSize,&key)==noErr && CFDataGetLength(key)==32);
+ memcpy(request.key,CFDataGetBytePtr(key),32);CFRelease(key);
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getppid(),&keyAddress,0,NULL,sizeof(key),&outSize,&key)==kAudioDevicePermissionsError);
+ AudioObjectPropertyAddress pcm=prop('vpcm');
+ CFDataRef qualifier=CFDataCreate(NULL,(const UInt8*)&request,sizeof(request));CFDataRef response=NULL;
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getpid(),&pcm,sizeof(qualifier),&qualifier,sizeof(response),&outSize,&response)==noErr);
+ VSPacket packet;memcpy(&packet,CFDataGetBytePtr(response),sizeof(packet));CFRelease(response);CFRelease(qualifier);
+ request.generation=packet.generation;request.cursor=packet.next;request.maxFrames=4;request.nonce++;
+ Float32 data[8]={.4f,.2f,.4f,.2f,.4f,.2f,.4f,.2f};
+ AudioServerPlugInIOCycleInfo cycle={0};gVolume_Master_Value=.5f;gMute_Master_Value=false;
  CHECK((*driver)->DoIOOperation(driver,kObjectID_Device,kObjectID_Stream_Output,0,kAudioServerPlugInIOOperationWriteMix,4,&cycle,data,NULL)==noErr);
- memset(data,0,sizeof(data));
- CHECK((*driver)->DoIOOperation(driver,kObjectID_Device2,kObjectID_Stream_Input,0,kAudioServerPlugInIOOperationReadInput,4,&cycle,data,NULL)==noErr);
- CHECK(fabsf(data[0]-0.2f)<1e-6f && fabsf(data[1]-0.1f)<1e-6f);
- gMute_Master_Value=true;
- (*driver)->DoIOOperation(driver,kObjectID_Device2,kObjectID_Stream_Input,0,kAudioServerPlugInIOOperationReadInput,4,&cycle,data,NULL);
- CHECK(data[0]==0 && data[1]==0);
- gRingBuffer=NULL;
+ qualifier=CFDataCreate(NULL,(const UInt8*)&request,sizeof(request));
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getppid(),&pcm,sizeof(qualifier),&qualifier,sizeof(response),&outSize,&response)==kAudioHardwareIllegalOperationError);
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,0,&pcm,sizeof(qualifier),&qualifier,sizeof(response),&outSize,&response)==kAudioHardwareIllegalOperationError);
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getpid(),&pcm,sizeof(qualifier),&qualifier,sizeof(response),&outSize,&response)==noErr);
+ memcpy(&packet,CFDataGetBytePtr(response),sizeof(packet));
+ CHECK(packet.frames==4 && packet.gain==.5f && packet.nonce==request.nonce && packet.next==request.cursor+4);
+ CHECK(((const Float32*)(CFDataGetBytePtr(response)+sizeof(packet)))[0]==.4f); // raw PCM, gain applied once at final render
+ CFDataRef retry=NULL;
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getpid(),&pcm,sizeof(qualifier),&qualifier,sizeof(retry),&outSize,&retry)==noErr && CFEqual(response,retry));
+ CFRelease(response);CFRelease(retry);CFRelease(qualifier);
+ CHECK((*driver)->DoIOOperation(driver,kObjectID_Device2,kObjectID_Stream_Input,0,kAudioServerPlugInIOOperationReadInput,4,&cycle,data,NULL)==kAudioHardwareIllegalOperationError);
 #if __has_include("../Sources/SoftwareVolumeDriver/Driver.c")
+ // A new session revokes the previous capability, even for the same PID.
+ CHECK(owner(driver,getpid(),0,sizeof(CFPropertyListRef))==noErr);
+ CHECK(owner(driver,getpid(),1,sizeof(CFPropertyListRef))==noErr);
+ qualifier=CFDataCreate(NULL,(const UInt8*)&request,sizeof(request));
+ CHECK((*driver)->GetPropertyData(driver,kObjectID_Device,getpid(),&pcm,sizeof(qualifier),&qualifier,sizeof(response),&outSize,&response)==kAudioHardwareIllegalOperationError);
+ CFRelease(qualifier);
  // Deterministic timeout uses the same expiry function as the timer.
  CHECK(owner(driver,getpid(),1,sizeof(CFPropertyListRef))==noErr);
  VorssaintAudioExpireOwner(VorssaintAudioNow()+6);

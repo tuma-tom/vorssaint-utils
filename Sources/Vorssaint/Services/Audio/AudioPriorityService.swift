@@ -109,10 +109,20 @@ final class AudioPriorityService: ObservableObject {
         let defaults = UserDefaults.standard
         outputPriorityEnabled = defaults.bool(forKey: DefaultsKey.audioPriorityOutputEnabled)
         inputPriorityEnabled = defaults.bool(forKey: DefaultsKey.audioPriorityInputEnabled)
-        outputPriorityUIDs = Defaults.sanitizedAudioPriorityUIDs(
-            defaults.array(forKey: DefaultsKey.audioPriorityOutputUIDs) ?? []).filter { !VirtualOutputSupport.isSoftwareDevice($0) }
-        inputPriorityUIDs = Defaults.sanitizedAudioPriorityUIDs(
+        let savedOutputs = Defaults.sanitizedAudioPriorityUIDs(
+            defaults.array(forKey: DefaultsKey.audioPriorityOutputUIDs) ?? [])
+        let savedInputs = Defaults.sanitizedAudioPriorityUIDs(
             defaults.array(forKey: DefaultsKey.audioPriorityInputUIDs) ?? [])
+        outputPriorityUIDs = savedOutputs.filter { !VirtualOutputSupport.isSoftwareDevice($0) }
+        inputPriorityUIDs = savedInputs.filter { !VirtualOutputSupport.isSoftwareDevice($0) }
+        // Persist retirement of our old private bridge identities. Offline
+        // hardware keeps its saved position for a later reconnect.
+        if outputPriorityUIDs != savedOutputs {
+            defaults.set(outputPriorityUIDs, forKey: DefaultsKey.audioPriorityOutputUIDs)
+        }
+        if inputPriorityUIDs != savedInputs {
+            defaults.set(inputPriorityUIDs, forKey: DefaultsKey.audioPriorityInputUIDs)
+        }
         deviceNames = Defaults.sanitizedAudioPriorityDeviceNames(
             defaults.dictionary(forKey: DefaultsKey.audioPriorityDeviceNames) ?? [:])
     }
@@ -164,7 +174,7 @@ final class AudioPriorityService: ObservableObject {
     }
 
     func setInputPriorityUIDs(_ uids: [String]) {
-        let sanitized = Defaults.sanitizedAudioPriorityUIDs(uids)
+        let sanitized = Defaults.sanitizedAudioPriorityUIDs(uids).filter { !VirtualOutputSupport.isSoftwareDevice($0) }
         guard sanitized != inputPriorityUIDs else { return }
         let defaults = UserDefaults.standard
         if sanitized.isEmpty {
@@ -287,7 +297,7 @@ final class AudioPriorityService: ObservableObject {
     }
 
     private func storeInputPriorityUIDs(_ uids: [String]) {
-        let sanitized = Defaults.sanitizedAudioPriorityUIDs(uids)
+        let sanitized = Defaults.sanitizedAudioPriorityUIDs(uids).filter { !VirtualOutputSupport.isSoftwareDevice($0) }
         guard sanitized != inputPriorityUIDs else { return }
         inputPriorityUIDs = sanitized
         UserDefaults.standard.set(sanitized, forKey: DefaultsKey.audioPriorityInputUIDs)

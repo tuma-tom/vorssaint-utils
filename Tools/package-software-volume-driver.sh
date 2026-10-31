@@ -12,7 +12,11 @@ cat > "$root_dir/scripts/postinstall" <<'POSTINSTALL'
 #!/bin/zsh
 set -euo pipefail
 legacy='/Library/Audio/Plug-Ins/HAL/VorssaintAudioFork.driver'
-if [[ -d "$legacy" ]] && [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$legacy/Contents/Info.plist" 2>/dev/null)" == com.vorssaint.audiofork.driver ]]; then
+legacy_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$legacy/Contents/Info.plist" 2>/dev/null || true)"
+current_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' /Library/Audio/Plug-Ins/HAL/VorssaintAudio.driver/Contents/Info.plist 2>/dev/null || true)"
+if [[ ! -L "$legacy" && -d "$legacy" && "$legacy_build" == <-> && "$current_build" == <-> ]] \
+    && (( legacy_build <= current_build )) \
+    && [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$legacy/Contents/Info.plist" 2>/dev/null)" == com.vorssaint.audiofork.driver ]]; then
     /bin/rm -rf "$legacy"
     /usr/sbin/pkgutil --forget com.vorssaint.audiofork.driver.pkg 2>/dev/null || true
 fi
@@ -26,9 +30,18 @@ import plistlib, sys
 path = sys.argv[1]
 with open(path, 'rb') as file:
     components = plistlib.load(file)
+# Corresponding Source contains the original Info.plist for reproducibility;
+# it is data, not a second installable bundle with the driver's identifier.
+components = [item for item in components
+              if item['RootRelativeBundlePath'].lstrip('./') == 'Library/Audio/Plug-Ins/HAL/VorssaintAudio.driver']
+if len(components) != 1:
+    raise SystemExit('Expected exactly one installable audio driver bundle')
 for component in components:
+    component.pop('ChildBundles', None)
+    component['BundleOverwriteAction'] = 'upgrade'
     component['BundleIsRelocatable'] = False
-    component['BundleIsVersionChecked'] = False
+    component['BundleIsVersionChecked'] = True
+    component['BundleHasStrictIdentifier'] = True
 with open(path, 'wb') as file:
     plistlib.dump(components, file)
 PYCOMPONENTS

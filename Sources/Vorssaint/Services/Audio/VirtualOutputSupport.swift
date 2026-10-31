@@ -25,7 +25,10 @@ enum VirtualOutputSupport {
     // Public builds/installers use Vorssaint Audio exclusively.
     static let legacyDeviceUID = "VorssaintAudioFork_UID"
     static func isSoftwareOutput(_ uid: String?) -> Bool { uid == deviceUID || uid == legacyDeviceUID }
-    static func isSoftwareDevice(_ uid: String?) -> Bool { isSoftwareOutput(uid) || uid == loopbackUID }
+    static func isSoftwareDevice(_ uid: String?) -> Bool {
+        isSoftwareOutput(uid) || uid == loopbackUID
+            || uid?.hasPrefix("com.vorssaint.utils.software-volume.bridge.") == true
+    }
     static func logicalOutputUID(current: String?, physical: String?, requested: String? = nil) -> String? {
         requested ?? (isSoftwareOutput(current) ? physical : current)
     }
@@ -48,6 +51,21 @@ enum VirtualOutputSupport {
         return (fallback ?? available).first
     }
 
+    /// The bundle stamps the exact optional-driver build it ships. Keep the
+    /// output-only protocol floor even if that metadata is absent or invalid.
+    static func requiredComponentBuild(bundledBuild: Int?) -> Int { max(4, bundledBuild ?? 4) }
+    static func needsComponentUpdate(installed: Bool, build: Int?, required: Int) -> Bool {
+        installed && (build ?? 0) < required
+    }
+    static func shouldOfferComponentUpdate(enabled: Bool, needsUpdate: Bool, offered: Bool, installing: Bool, removing: Bool) -> Bool {
+        enabled && needsUpdate && !offered && !installing && !removing
+    }
+
+    static func shouldOpenBundledInstaller(installedBuild: Int?, bundledBuild: Int, ready: Bool) -> Bool {
+        guard let installedBuild else { return true }
+        return installedBuild < bundledBuild || (installedBuild == bundledBuild && !ready)
+    }
+
     enum EnableAction { case enable, disable, install }
     static func enableAction(requested: Bool, componentReady: Bool) -> EnableAction {
         if !requested { return .disable }
@@ -55,76 +73,17 @@ enum VirtualOutputSupport {
     }
     enum Issue { case outputUnavailable, setupFailed, privacyUnverified, inUse, stopped, installerMissing, removalFailed }
 
-    enum InputSource { case virtualOutput(streams: Int, physicalStreams: Int), processTap(physicalStreams: Int) }
+    enum InputSource { case physicalOutput(streams: Int), processTap(physicalStreams: Int) }
     static func inputMask(streamCount: Int, source: InputSource) -> [UInt32]? {
-        guard streamCount > 0 else { return nil }
+        guard streamCount >= 0 else { return nil }
         switch source {
-        case .virtualOutput(let streams, let physicalStreams):
-            guard streams > 0, physicalStreams >= 0, streamCount == streams + physicalStreams else { return nil }
-            return (0..<streamCount).map { $0 < streams ? 1 : 0 }
+        case .physicalOutput(let streams):
+            guard streams >= 0, streamCount == streams else { return nil }
+            return [UInt32](repeating: 0, count: streams)
         case .processTap(let physicalStreams):
             guard physicalStreams >= 0, streamCount == physicalStreams + 1 else { return nil }
             return (0..<streamCount).map { $0 == streamCount - 1 ? 1 : 0 }
         }
     }
 
-    /// Layouts are read and validated off the audio thread. Virtual input is
-    /// first in the explicitly ordered aggregate, even if hardware has a mic.
-    struct RenderPlan {
-        struct Channel {
-            let buffer: Int
-            let channel: Int
-            let stride: Int
-        }
-        let inputChannels: [UInt32]
-        let outputChannels: [UInt32]
-        let sources: [Channel]
-        let targets: [Channel]
-        init?(inputChannels: [UInt32], outputChannels: [UInt32], physicalOutputOffset: Int) {
-            func channels(_ layout: [UInt32]) -> [Channel] {
-                layout.enumerated().flatMap { index, count in
-                    (0..<Int(count)).map { Channel(buffer: index, channel: $0, stride: Int(count)) }
-                }
-            }
-            let inputs = channels(inputChannels), outputs = channels(outputChannels)
-            guard inputs.count >= 2, physicalOutputOffset >= 0,
-                  outputs.count >= physicalOutputOffset + 2 else { return nil }
-            self.inputChannels = inputChannels
-            self.outputChannels = outputChannels
-            sources = Array(inputs.prefix(2))
-            targets = Array(outputs.dropFirst(physicalOutputOffset).prefix(2))
-        }
-        @discardableResult
-        func render(input: UnsafeMutableAudioBufferListPointer, output: UnsafeMutableAudioBufferListPointer) -> Bool {
-            // Write every output on every path; the virtual pair MUST be zero.
-            for buffer in output {
-                if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) }
-            }
-            guard input.count == inputChannels.count, output.count == outputChannels.count else { return false }
-            for index in input.indices where input[index].mNumberChannels != inputChannels[index] { return false }
-            for index in output.indices where output[index].mNumberChannels != outputChannels[index] { return false }
-            var commonFrames = 0
-            for index in 0..<2 {
-                let source = sources[index], target = targets[index]
-                let sourceBytes = Int(input[source.buffer].mDataByteSize)
-                let targetBytes = Int(output[target.buffer].mDataByteSize)
-                guard input[source.buffer].mData != nil, output[target.buffer].mData != nil,
-                      sourceBytes % (4 * source.stride) == 0,
-                      targetBytes % (4 * target.stride) == 0 else { return false }
-                let frames = min(sourceBytes / (4 * source.stride), targetBytes / (4 * target.stride))
-                guard frames > 0, index == 0 || frames == commonFrames else { return false }
-                commonFrames = frames
-            }
-            for index in 0..<2 {
-                let source = sources[index], target = targets[index]
-                let from = input[source.buffer].mData!.assumingMemoryBound(to: Float.self)
-                let to = output[target.buffer].mData!.assumingMemoryBound(to: Float.self)
-                for frame in 0..<commonFrames {
-                    let value = from[frame * source.stride + source.channel]
-                    to[frame * target.stride + target.channel] = value.isFinite ? value : 0
-                }
-            }
-            return true
-        }
-    }
 }
