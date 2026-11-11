@@ -2,6 +2,15 @@
 
 This branch is for a personal 2018 MacBook Pro running macOS Sequoia 15.8.1. It is not an official Vorssaint release. No upstream PR or release is part of this work.
 
+## Ownership and maintenance
+
+- Maintain this variant in [tuma-tom/vorssaint-utils](https://github.com/tuma-tom/vorssaint-utils/tree/feature/legacy-intel-support), on `feature/legacy-intel-support`.
+- Push this branch only to the `fork` remote. Do not open a PR, push changes to the official repository, or publish an official release for this work.
+- Bring upstream fixes into this branch as needed, preserve the Intel build entry point and developer identity, then rebuild and test on the 2018 MacBook before updating the personal build.
+- Keep signing keys and credentials local. Build outputs remain outside Git; retain the final signed transfer package.
+
+The local branch tracks `fork/feature/legacy-intel-support`, and its push destination is explicitly set to `fork`.
+
 ## Rebuild
 
 With Xcode or the Command Line Tools installed:
@@ -52,3 +61,4 @@ Intel temperature discovery includes CPU core/package/proximity sensors and Inte
 - Native metrics/update/repository suites: 2,114 checks passed. Intel sensor regression, Intel SDK smoke compilation, and developer install isolation passed.
 - Full native suite: 123,117 checks, two failures in `QuitAppsRuntimeTests.swift` (lines 182 and 197: all-apps exception preservation and disabled-feature batch behavior). Its `utilities` suite passed all 553 checks when repeated alone. This is a limitation of the full verification run; no unrelated Quit Apps code was changed.
 - Software audio driver/bridge/uninstall/PCM/playback tests passed. Intel helper execution and actual destination hardware remain unverified because the build host cannot execute x86_64 programs.
+- After transferring the build, the owner reported on 2026-11-11 that the expected features appear to work on the destination MacBook Pro 2018 with macOS Sequoia 15.8.1. This is a successful personal smoke test, rather than an exhaustive hardware compatibility test.
