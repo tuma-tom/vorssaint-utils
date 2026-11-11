@@ -5,6 +5,7 @@ import Darwin
 import Foundation
 
 enum CPUTemperaturePlatform: Equatable {
+    case intel
     case appleM1Family
     case appleM2Family
     case appleM3Family
@@ -76,6 +77,7 @@ enum TemperatureSensorSelector {
 
     static func platform(brandString: String?) -> CPUTemperaturePlatform {
         let brand = brandString?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if brand.hasPrefix("Intel") { return .intel }
         // Preserve the established Tp/Te reading path for this supported chip
         // until a verified per-core map is available.
         if brand == "Apple A18 Pro" { return .generic }
@@ -155,7 +157,7 @@ enum TemperatureSensorSelector {
         case .appleM1Family, .appleM2Family, .appleM3Family, .appleM4Family,
              .appleM4ProFamily, .appleM4MaxFamily, .appleM5Family:
             return true
-        case .unmappedAppleSilicon, .generic: return false
+        case .intel, .unmappedAppleSilicon, .generic: return false
         }
     }
 
@@ -173,15 +175,28 @@ enum TemperatureSensorSelector {
             return appleM4ProMaxCPUCoreKeys.contains(key)
         case .appleM5Family:
             return appleM5CPUCoreKeys.contains(key)
-        case .unmappedAppleSilicon, .generic:
+        case .intel, .unmappedAppleSilicon, .generic:
             return false
         }
     }
 
     static func isCPUTemperatureKey(_ key: String,
                                     platform: CPUTemperaturePlatform) -> Bool {
+        if platform == .intel {
+            // Intel core/package/proximity sensors. TCGC is integrated graphics,
+            // so matching every TC key would misreport GPU heat as CPU heat.
+            return key.range(of: "^TC[0-9A-Fa-f][CcDP]$", options: .regularExpression) != nil
+        }
         if key.hasPrefix("Tp") || key.hasPrefix("Te") { return true }
         return platform == .appleM3Family && key.hasPrefix("Tf")
+    }
+
+    static func isGPUTemperatureKey(_ key: String,
+                                    platform: CPUTemperaturePlatform) -> Bool {
+        if platform == .intel {
+            return ["TCGC", "TG0D", "TGDD", "TG0H", "TG0P"].contains(key)
+        }
+        return key.hasPrefix("Tg")
     }
 
     static func stabilizedTemperature(_ reading: Double?,

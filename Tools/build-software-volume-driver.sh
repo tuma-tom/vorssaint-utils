@@ -2,13 +2,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
 cd "$(dirname "$0")/.."
+build_arch="${VORSSAINT_ARCH:-arm64}"
+case "$build_arch" in
+    arm64|x86_64) ;;
+    *) print -u2 "Unsupported VORSSAINT_ARCH: $build_arch (use arm64 or x86_64)"; exit 1 ;;
+esac
 mkdir -p build
 xcrun clang -std=gnu11 -O2 -fblocks Tests/SoftwareVolumeDriverTests.c -framework CoreAudio -framework CoreFoundation -framework Accelerate -framework Security -o build/software-volume-driver-tests
 codesign -s - --identifier com.vorssaint.utils.pcm-tests build/software-volume-driver-tests
 ./build/software-volume-driver-tests
 bundle="$PWD/build/VorssaintAudio.driver"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
-xcrun clang -std=gnu11 -O2 -fblocks -bundle -arch arm64 -mmacosx-version-min=14.4 Sources/SoftwareVolumeDriver/Driver.c -framework CoreAudio -framework CoreFoundation -framework Accelerate -framework Security -o "$bundle/Contents/MacOS/VorssaintAudio"
+xcrun clang -std=gnu11 -O2 -fblocks -bundle -arch "$build_arch" -mmacosx-version-min=14.4 Sources/SoftwareVolumeDriver/Driver.c -framework CoreAudio -framework CoreFoundation -framework Accelerate -framework Security -o "$bundle/Contents/MacOS/VorssaintAudio"
 cp Sources/SoftwareVolumeDriver/Info.plist "$bundle/Contents/Info.plist"
 cp ThirdParty/BlackHole/LICENSE "$bundle/Contents/Resources/BlackHole-LICENSE.txt"
 cp ThirdParty/BlackHole/UPSTREAM.md "$bundle/Contents/Resources/BlackHole-UPSTREAM.md"

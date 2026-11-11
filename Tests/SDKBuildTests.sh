@@ -11,6 +11,7 @@ trap 'command rm -rf "$sdk_test_dir"' EXIT
 # With SDK 27+, this fails if SwiftUI's State macro plugin cannot be loaded.
 sed -n '/^# Prefer the macOS 26 SDK/,/^# The defaults migrations/{ /^# The defaults migrations/!p; }' build.sh > "$sdk_test_dir/config.zsh"
 [[ -s "$sdk_test_dir/config.zsh" ]]
+TARGET="${VORSSAINT_ARCH:-arm64}-apple-macosx14.0"
 source "$sdk_test_dir/config.zsh"
 if [[ -n "${SDKROOT:-}" && -d "$SDKROOT" ]]; then
     [[ "$SDK" -ef "$SDKROOT" ]] || {
@@ -25,6 +26,6 @@ struct MacroCheck: View {
     var body: some View { Text(enabled ? "on" : "off") }
 }
 SWIFT
-swiftc -typecheck -target arm64-apple-macosx14.0 -sdk "$SDK" \
+swiftc -typecheck -target "$TARGET" -sdk "$SDK" \
     "${SDK_COMPAT_FLAGS[@]}" "$sdk_test_dir/MacroCheck.swift"
 print "SDK BUILD TESTS OK ($SDK)"

@@ -67,7 +67,12 @@ FAN_HELPER_ID="$APP_BUNDLE_ID.fan-control"
 # Sources/NowPlayingAdapter. Staged under Contents/Frameworks, signed on its own.
 NOW_PLAYING_ADAPTER_ID="$APP_BUNDLE_ID.now-playing"
 NOW_PLAYING_ADAPTER="libVorssaintNowPlaying.dylib"
-TARGET="arm64-apple-macosx14.0"
+BUILD_ARCH="${VORSSAINT_ARCH:-arm64}"
+case "$BUILD_ARCH" in
+    arm64|x86_64) ;;
+    *) print -u2 "Unsupported VORSSAINT_ARCH: $BUILD_ARCH (use arm64 or x86_64)"; exit 1 ;;
+esac
+TARGET="$BUILD_ARCH-apple-macosx14.0"
 ENTITLEMENTS="Resources/Vorssaint.entitlements"
 LEGACY_IDENTITY="Vorssaint Utils Signing"
 
@@ -216,8 +221,8 @@ VM_STATISTICS_COMPAT_FLAGS=(-I Sources/VMStatisticsCompat -I Sources/SoftwareVol
 HID_EVENT_SYSTEM_FLAGS=(-I Sources/HIDEventSystem)
 CORE_AUDIO_TAP_FLAGS=(-I Sources/CoreAudioTapCompat)
 GIF_CODEC_FLAGS=(-I Sources/RecorderGIFCodec)
-GIF_CODEC_OBJECTS=(build/objects/recorder-gif-codec/RecorderGIFCodec.o
-                   build/objects/recorder-gif-codec/cgif_raw.o)
+GIF_CODEC_OBJECTS=(build/objects/recorder-gif-codec/${VORSSAINT_ARCH:-arm64}/RecorderGIFCodec.o
+                   build/objects/recorder-gif-codec/${VORSSAINT_ARCH:-arm64}/cgif_raw.o)
 if [[ "$SDK" -ef "$PINNED_SDK" ]]; then
     # Swift 6.4 can read the SDK 26 interfaces when given their compiler version.
     SDK_COMPAT_FLAGS=(-Xfrontend -interface-compiler-version -Xfrontend 6.3.2)
@@ -246,6 +251,7 @@ if (( ${SDK_VERSION%%.*} >= 27 )); then
 fi
 echo "  SDK: macOS $SDK_VERSION ($SDK)"
 echo "  Compiler: $(swiftc --version 2>&1 | head -1)"
+echo "  Target: $TARGET"
 
 # The defaults migrations under test need a real UserDefaults suite, and every
 # suite leaves an empty plist in ~/Library/Preferences. The tests already clear
@@ -280,7 +286,7 @@ discard_test_preferences() {
 
 # Standalone automated tests: pure contracts plus isolated disk, subprocess,
 # keyboard-data and media fixtures. No application windows or device capture.
-mkdir -p build/objects/recorder-gif-codec
+mkdir -p "${GIF_CODEC_OBJECTS[1]:h}"
 xcrun clang -O3 -std=c99 -target "$TARGET" -isysroot "$SDK" \
     -c Sources/RecorderGIFCodec/RecorderGIFCodec.c -o "$GIF_CODEC_OBJECTS[1]"
 xcrun clang -O3 -std=c99 -target "$TARGET" -isysroot "$SDK" \
@@ -288,7 +294,7 @@ xcrun clang -O3 -std=c99 -target "$TARGET" -isysroot "$SDK" \
 
 if (( TEST )); then
     python3 Tests/generate_sources.py
-    TEST_OBJECT_DIR="build/objects/tests"
+    TEST_OBJECT_DIR="build/objects/tests/$BUILD_ARCH"
     mkdir -p "$TEST_OBJECT_DIR"
     TEST_SOURCES=(
         Sources/Vorssaint/Services/Media/MediaSupport.swift
@@ -650,6 +656,7 @@ if (( TEST )); then
         ./Tests/UninstallSpacesTests.sh || test_status=1
         ./Tests/DeveloperInstallIsolationTests.sh || test_status=1
         ./Tests/SDKBuildTests.sh || test_status=1
+        ./Tests/LegacyIntelTemperatureTests.sh || test_status=1
     fi
     if (( ${#TEST_ARGS} == 0 )) || [[ " ${TEST_ARGS[*]} " == *" --suite=mixer "* ]]; then
         ./Tools/test-software-volume.sh || test_status=1
@@ -667,7 +674,7 @@ if (( ! DEV )); then
     # changed since, and a fresh checkout has none.
     find build -mindepth 1 -maxdepth 1 ! -name objects -exec rm -rf {} + 2>/dev/null || true
 fi
-APP_OBJECT_DIR="build/objects/$EXECUTABLE"
+APP_OBJECT_DIR="build/objects/$EXECUTABLE/$BUILD_ARCH"
 mkdir -p build "$APP_OBJECT_DIR"
 APP_OUTPUT_FILE_MAP="$APP_OBJECT_DIR/output-file-map.json"
 write_swift_output_file_map "$APP_OUTPUT_FILE_MAP" "$APP_OBJECT_DIR" "${APP_SOURCES[@]}"
@@ -692,7 +699,11 @@ swiftc -O -target "$TARGET" -sdk "$SDK" "${SDK_COMPAT_FLAGS[@]}" "${BUILD_VARIAN
     Sources/Vorssaint/Services/FanControl/FanControlHardware.swift \
     Sources/FanControlHelper/main.swift \
     -o "build/$FAN_HELPER_ID"
-"build/$FAN_HELPER_ID" --selftest
+if /usr/bin/arch -"$BUILD_ARCH" /usr/bin/true 2>/dev/null; then
+    "build/$FAN_HELPER_ID" --selftest
+else
+    echo "  fan helper self-test not run: this host cannot execute $BUILD_ARCH (run it on the destination Mac)"
+fi
 
 echo "▸ Compiling Now Playing adapter…"
 swiftc -O -target "$TARGET" -sdk "$SDK" "${SDK_COMPAT_FLAGS[@]}" -emit-library \
@@ -752,7 +763,7 @@ cp Resources/com.vorssaint.utils.fan-control.plist \
 cp Resources/Info.plist "$STAGE/Contents/Info.plist"
 cp CHANGELOG.md "$STAGE/Contents/Resources/CHANGELOG.md"
 # Bundle the optional installer; opening the mixer never executes it.
-./Tools/build-software-volume-driver.sh
+VORSSAINT_ARCH="$BUILD_ARCH" SDKROOT="$SDK" ./Tools/build-software-volume-driver.sh
 ./Tools/package-software-volume-driver.sh
 cp build/VorssaintAudio.pkg "$STAGE/Contents/Resources/"
 SOFTWARE_VOLUME_DRIVER_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/SoftwareVolumeDriver/Info.plist)"
