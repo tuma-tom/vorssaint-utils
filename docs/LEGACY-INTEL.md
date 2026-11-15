@@ -62,3 +62,11 @@ Intel temperature discovery includes CPU core/package/proximity sensors and Inte
 - Full native suite: 123,117 checks, two failures in `QuitAppsRuntimeTests.swift` (lines 182 and 197: all-apps exception preservation and disabled-feature batch behavior). Its `utilities` suite passed all 553 checks when repeated alone. This is a limitation of the full verification run; no unrelated Quit Apps code was changed.
 - Software audio driver/bridge/uninstall/PCM/playback tests passed. Intel helper execution and actual destination hardware remain unverified because the build host cannot execute x86_64 programs.
 - After transferring the build, the owner reported on 2026-11-11 that the expected features appear to work on the destination MacBook Pro 2018 with macOS Sequoia 15.8.1. This is a successful personal smoke test, rather than an exhaustive hardware compatibility test.
+
+## Integration update (2026-11-15)
+
+- Merged the published audio branch through `e857cd07`, including upstream main `89d26260`. The personal Intel entry point, per-architecture object folders, Intel temperature selection and fail-closed fan behavior are retained; none of those personal adaptations is added to upstream PR #3656.
+- The bundled optional driver is now 1.4.0/build 6. The original master curve remains the default, with an optional perceptual curve and gain-preserving switching. Settings/Command Bar discovery works before Volume mixer installation and opens expanded Options when installed.
+- The combined source passed 127,357 of 127,358 native checks; the only failure is the existing `Tests/NotchCompactTests.swift:339` baseline. Mixer: 5,473; Settings: 1,303. Driver/bridge/uninstall/PCM/playback/multichannel checks and the Intel sensor regression passed. The x86_64 SDK smoke compilation passed with SDK 27.2.
+- Each transfer ZIP includes its exact source commit, target architecture, driver version and public signing-certificate fingerprint in `BUILD-INFO.json`. Matching app/helper/adapter/driver signatures and archive round-trip checks are performed during packaging. No private key is included.
+- The previous destination smoke test remains historical. The newly delivered build still needs a test on the actual 2018 Intel MacBook, including hardware sensors, HDMI/native audio, microphone use and sleep/reconnect behavior.

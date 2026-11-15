@@ -172,6 +172,7 @@ enum DefaultsKey {
     static let mixerHeadphonesDisconnectSilenceAllowed = "mixerHeadphonesDisconnectSilenceAllowed" // one-time: volumes below 10% were rewritten before silence became a choice
     static let preciseVolumeRollerEnabled = "preciseVolumeRollerEnabled"
     static let mixerSoftwareVolumeEnabled = "mixerSoftwareVolumeEnabled"
+    static let mixerPerceptualVolumeEnabled = "mixerPerceptualVolumeEnabled"
     static let mixerSoftwareVolumes = "mixerSoftwareVolumes"
     static let softwareVolumePhysicalOutputUID = "softwareVolumePhysicalOutputUID"
     static let soundOutputSwitcherEnabled = "soundOutputSwitcherEnabled"
@@ -1086,11 +1087,11 @@ enum SupportUpdateIntroInfo {
     /// The stable release that gets this invitation, and the patches after it,
     /// which share one completion marker. The next stable update also includes
     /// people who completed the previous invitation.
-    static let releaseVersion = "3.4.3"
+    static let releaseVersion = "3.4.4"
 
     // Older beta onboarding wrote the release version before this screen was
     // available. A distinct completion marker keeps those upgraders eligible.
-    static let seenVersion = "3.4.3-support"
+    static let seenVersion = "3.4.4-support"
 
     static func matchesRelease(_ appVersion: String) -> Bool {
         guard let version = UpdateServiceSupport.SemanticVersion(raw: appVersion),
@@ -1364,6 +1365,7 @@ enum Defaults {
         DefaultsKey.mixerHeadphonesDisconnectSilenceAllowed: false,
         DefaultsKey.preciseVolumeRollerEnabled: false,
         DefaultsKey.mixerSoftwareVolumeEnabled: false,
+        DefaultsKey.mixerPerceptualVolumeEnabled: false,
         DefaultsKey.soundOutputSwitcherEnabled: false,
         DefaultsKey.soundOutputSwitcherShortcut: GlobalShortcut.soundOutputSwitcherDefault.storageValue,
         // The feature itself ships uninstalled. On first install both halves
